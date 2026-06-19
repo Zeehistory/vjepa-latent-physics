@@ -95,8 +95,9 @@ python scripts/extract_latents.py \
   --output_dir outputs/latents/physics_iq/vjepa2_large
 ```
 
-`configs/encoder/vjepa2_large.yaml` points at `facebook/vjepa2-vitl-fpc64-256` (HuggingFace). Run on a
-CUDA box; the encoder stays **frozen** by default.
+`configs/encoder/vjepa2_large.yaml` points at `facebook/vjepa2-vitl-fpc64-256` (HuggingFace), i.e.
+VJEPA2 ViT-L with 24 layers. Run on a CUDA box; the encoder stays **frozen** by default. Treat ViT-H /
+32-layer validation as a separate config and latent cache, not a drop-in reuse of the ViT-L run.
 
 ## Full training
 
@@ -107,6 +108,10 @@ accelerate launch scripts/train_decoder.py \
   --latent_dir outputs/latents/physics_iq/vjepa2_large \
   --output_dir outputs/runs/physics_iq_decoder_large
 ```
+
+Physics-IQ evaluation reports global metrics plus `reconstruction.by_category` / `physics.by_category`
+entries, so fluid dynamics, optics, thermodynamics, solid mechanics, magnetism, and misc clips stay
+separated in `metrics.json`.
 
 Decoder sizes (`configs/decoder/`): `decoder_small` (512/8/8), `decoder_base` (768/12/12),
 `decoder_large` (1024/24/16), `decoder_huge` (1536/32/24).

@@ -13,6 +13,11 @@ official source and expected layout (`manifest.json` or `<split>/<category>/*.mp
 `data.root` in `configs/data/physics_iq.yaml`. No per-frame numeric labels, so physics-state metrics
 are skipped (mask = 0) rather than faked; reconstruction and latent analysis use it fully.
 
+Category names are preserved from `manifest.json` or the directory tree and can be filtered with
+`data.categories`. Decoder evaluation also writes per-category metrics, so categories such as
+`fluid_dynamics`, `optics`, `thermodynamics`, `solid_mechanics`, and `magnetism` are not collapsed into
+only a single global Physics-IQ number.
+
 ## DROID (robotics, Stage 2)
 Typed stub (`src/data/droid.py`). Used later to test decoding/steering of latent failures toward task
 success. See the roadmap in `docs/method.md`.

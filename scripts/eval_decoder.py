@@ -15,6 +15,7 @@ Example
 from __future__ import annotations
 
 import argparse
+from collections import Counter, defaultdict
 import json
 from pathlib import Path
 from typing import Any
@@ -32,12 +33,64 @@ from src.training.checkpoints import load_checkpoint
 from src.utils.config import load_config
 
 
+_WEIGHT_KEY = "_weight"
+
+
+def _weighted(metrics: dict[str, Any], weight: int) -> dict[str, Any]:
+    out = dict(metrics)
+    out[_WEIGHT_KEY] = int(weight)
+    return out
+
+
 def _avg(dicts: list[dict[str, Any]]) -> dict[str, Any]:
-    keys = dicts[0].keys()
+    if not dicts:
+        return {}
+    keys = {k for d in dicts for k in d if k != _WEIGHT_KEY}
     out: dict[str, Any] = {}
     for k in keys:
-        vals = [d[k] for d in dicts if d[k] is not None]
-        out[k] = float(sum(vals) / len(vals)) if vals else None
+        weighted_vals = [
+            (float(d[k]), float(d.get(_WEIGHT_KEY, 1.0)))
+            for d in dicts
+            if d.get(k) is not None
+        ]
+        denom = sum(w for _, w in weighted_vals)
+        out[k] = float(sum(v * w for v, w in weighted_vals) / denom) if denom else None
+    return out
+
+
+def _new_recon_bucket() -> dict[str, Any]:
+    return {
+        "model": [],
+        "baselines": {k: [] for k in ("copy_first_frame", "mean_frame", "random_frame")},
+    }
+
+
+def _summarize_recon_bucket(bucket: dict[str, Any], count: int | None = None) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "model": _avg(bucket["model"]) if bucket["model"] else None,
+        "baselines": {
+            k: _avg(v)
+            for k, v in bucket["baselines"].items()
+            if v and any(item for item in v)
+        },
+    }
+    if count is not None:
+        out = {"num_clips": int(count), **out}
+    return out
+
+
+def _summarize_physics_bucket(
+    model: list[dict[str, Any]],
+    oracle: list[dict[str, Any]],
+    count: int | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "model": _avg(model) if model else None,
+        "oracle_upper_bound": _avg(oracle) if oracle else None,
+        "state_available": bool(model),
+    }
+    if count is not None:
+        out = {"num_clips": int(count), **out}
     return out
 
 
@@ -58,8 +111,11 @@ def evaluate_decoder(cfg, latent_dir: str, checkpoint: str, output_dir: str | Pa
 
     loader = DataLoader(dataset, batch_size=cfg.train.batch_size, shuffle=False,
                         collate_fn=latent_collate)
-    recon_model, recon_base = [], {k: [] for k in ("copy_first_frame", "mean_frame", "random_frame")}
+    recon = _new_recon_bucket()
+    recon_by_category = defaultdict(_new_recon_bucket)
+    category_counts: Counter[str] = Counter()
     phys_model, phys_oracle = [], []
+    phys_by_category = defaultdict(lambda: {"model": [], "oracle": []})
     state_keys = dataset[0]["state_keys"]
 
     for batch in loader:
@@ -67,26 +123,71 @@ def evaluate_decoder(cfg, latent_dir: str, checkpoint: str, output_dir: str | Pa
         latents = {int(k): v.to(device) for k, v in batch["layers"].items()}
         out = decoder(latents, grid)
         target = batch["frames"].to(device)
+        categories = [str(c) for c in batch["category"]]
+        category_counts.update(categories)
+        batch_size = len(categories)
+
         if out.frames is not None:
-            recon_model.append(reconstruction_metrics(out.frames, target))
-            for name, base in frame_baselines(target).items():
-                recon_base[name].append(reconstruction_metrics(base, target))
+            recon["model"].append(_weighted(reconstruction_metrics(out.frames, target), batch_size))
+            baselines = frame_baselines(target)
+            for name, base in baselines.items():
+                recon["baselines"][name].append(_weighted(reconstruction_metrics(base, target), batch_size))
+
+            for category in sorted(set(categories)):
+                indices = [i for i, c in enumerate(categories) if c == category]
+                bucket = recon_by_category[category]
+                bucket["model"].append(
+                    _weighted(reconstruction_metrics(out.frames[indices], target[indices]), len(indices))
+                )
+                for name, base in baselines.items():
+                    bucket["baselines"][name].append(
+                        _weighted(reconstruction_metrics(base[indices], target[indices]), len(indices))
+                    )
+
         if out.state is not None and batch["state_mask"].sum() > 0:
             tgt_state, mask = batch["state"].to(device), batch["state_mask"][0]
-            phys_model.append(physics_metrics(out.state, tgt_state, state_keys, mask))
-            phys_oracle.append(physics_metrics(oracle_state(tgt_state), tgt_state, state_keys, mask))
+            phys_model.append(_weighted(physics_metrics(out.state, tgt_state, state_keys, mask), batch_size))
+            phys_oracle.append(
+                _weighted(physics_metrics(oracle_state(tgt_state), tgt_state, state_keys, mask), batch_size)
+            )
+
+            for category in sorted(set(categories)):
+                indices = [i for i, c in enumerate(categories) if c == category]
+                category_mask = batch["state_mask"][indices[0]]
+                if category_mask.sum() <= 0:
+                    continue
+                bucket = phys_by_category[category]
+                pred_state = out.state[indices]
+                target_state = tgt_state[indices]
+                bucket["model"].append(
+                    _weighted(physics_metrics(pred_state, target_state, state_keys, category_mask), len(indices))
+                )
+                bucket["oracle"].append(
+                    _weighted(
+                        physics_metrics(oracle_state(target_state), target_state, state_keys, category_mask),
+                        len(indices),
+                    )
+                )
 
     result: dict[str, Any] = {
         "checkpoint": checkpoint,
         "num_clips": len(dataset),
+        "category_counts": dict(sorted(category_counts.items())),
         "reconstruction": {
-            "model": _avg(recon_model) if recon_model else None,
-            "baselines": {k: _avg(v) for k, v in recon_base.items() if v and v[0]},
+            **_summarize_recon_bucket(recon),
+            "by_category": {
+                category: _summarize_recon_bucket(bucket, category_counts[category])
+                for category, bucket in sorted(recon_by_category.items())
+            },
         },
         "physics": {
-            "model": _avg(phys_model) if phys_model else None,
-            "oracle_upper_bound": _avg(phys_oracle) if phys_oracle else None,
-            "state_available": bool(phys_model),
+            **_summarize_physics_bucket(phys_model, phys_oracle),
+            "by_category": {
+                category: _summarize_physics_bucket(
+                    bucket["model"], bucket["oracle"], category_counts[category]
+                )
+                for category, bucket in sorted(phys_by_category.items())
+            },
         },
         "claim_taxonomy_note": (
             "reconstruction.model beating baselines => pixels are decodable; physics.model near "

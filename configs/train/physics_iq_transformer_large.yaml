@@ -1,4 +1,5 @@
-# Full-scale config for large compute: real V-JEPA2 latents + large transformer decoder on Physics-IQ.
+# Full-scale first-pass config: VJEPA2 ViT-L/24-layer latents + large transformer decoder on Physics-IQ.
+# For a later ViT-H/32-layer validation, update the encoder checkpoint/spec and use a separate latent_dir.
 # Run extraction first (scripts/extract_latents.py), then `accelerate launch scripts/train_decoder.py`.
 encoder:
   name: vjepa2
@@ -66,4 +67,4 @@ train:
 output_dir: outputs/runs/physics_iq_decoder_large
 latent_dir: outputs/latents/physics_iq/vjepa2_large
 wandb: true
-tags: [physics_iq, vjepa2, decoder_large]
+tags: [physics_iq, vjepa2, vit_l_24, decoder_large]
