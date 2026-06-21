@@ -1,0 +1,12 @@
+# Step 4 development fallback: synthetic robot reach task with success/failure labels.
+# Same contract as DROID (success exposed via category); use to build the detect-and-steer pipeline
+# before DROID data is available.
+name: robot_toy
+root: null
+image_size: 64
+num_frames: 16
+fps: 8
+categories: all
+split: train
+num_clips: 128
+seed: 0

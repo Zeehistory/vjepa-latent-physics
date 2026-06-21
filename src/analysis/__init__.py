@@ -2,14 +2,25 @@
 
 from __future__ import annotations
 
-from . import visualization
+from . import robotics_steering, steering, subspace, visualization
 from .direction_codes import circular_code_score
 from .intervention import apply_intervention, discover_direction, intervention_sweep
 from .latent_geometry import layerwise_cka_matrix, pca, pooled_features
 from .manifold_analysis import embed_2d, variable_axis_alignment
+from .steering import (
+    decode_intervention,
+    discover_quantity_direction,
+    interpolate_trajectories,
+    readout_along_direction,
+    steer_to_target,
+)
+from .subspace import category_directions, cosine_matrix, principal_angles, separability
 
 __all__ = [
     "visualization",
+    "steering",
+    "subspace",
+    "robotics_steering",
     "circular_code_score",
     "discover_direction",
     "apply_intervention",
@@ -19,4 +30,13 @@ __all__ = [
     "layerwise_cka_matrix",
     "embed_2d",
     "variable_axis_alignment",
+    "decode_intervention",
+    "readout_along_direction",
+    "steer_to_target",
+    "interpolate_trajectories",
+    "discover_quantity_direction",
+    "category_directions",
+    "cosine_matrix",
+    "principal_angles",
+    "separability",
 ]

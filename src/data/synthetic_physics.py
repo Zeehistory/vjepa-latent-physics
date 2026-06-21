@@ -11,8 +11,9 @@ Each generated clip yields:
 * ``state_keys``: names for each column of ``state``.
 * ``meta``: scenario, gravity, seed, per-object static attributes, collision frames.
 
-Scenarios implemented: ``bouncing_ball``, ``projectile``, ``collision``, ``pendulum``,
-``two_body``, ``occlusion`` (object-permanence probe).
+Scenarios implemented: ``bouncing_ball``, ``projectile``, ``free_fall``, ``collision``, ``pendulum``,
+``two_body``, ``occlusion`` (object-permanence probe), ``fluid`` (diffusive particle swarm — a
+lightweight fluid-like dynamics class for the rigid-vs-fluid subspace question).
 
 The renderer is intentionally simple and deterministic (no external physics engine) so the dataset is
 reproducible anywhere and the ground truth is exact. Heavier engines (PyBullet/Box2D, soft-body,
@@ -214,6 +215,58 @@ class SyntheticPhysics:
             b.pos = b.pos + b.vel
         return self._finish(frames, states, keys, scenario="occlusion", gravity=gravity,
                             extra={"occluder": occ})
+
+    def _scenario_free_fall(self, rng: np.random.Generator) -> Clip:
+        """Pure vertical free-fall from rest (clean gravity/acceleration probe target)."""
+        gravity = float(rng.uniform(0.006, 0.012))
+        radius = float(rng.uniform(0.04, 0.08))
+        b = Body(
+            pos=np.array([rng.uniform(0.3, 0.7), rng.uniform(0.05, 0.15)]),
+            vel=np.array([0.0, 0.0]),
+            radius=radius,
+            mass=radius**2,
+            color=(0.85, 0.85, 0.3),
+        )
+        return self._simulate([b], gravity, restitution=0.0, scenario="free_fall")
+
+    def _scenario_fluid(self, rng: np.random.Generator) -> Clip:
+        """Diffusive particle swarm under gravity — a lightweight *fluid-like* dynamics class.
+
+        Distinct from rigid single-body motion: many small particles with stochastic jitter and wall
+        collisions. Ground-truth state is the swarm *aggregate* (centroid pos/vel/acc, spread as
+        ``radius``, particle count as ``mass``) packed into the standard single-object layout so it
+        shares the state contract with the rigid scenarios.
+        """
+        gravity = float(rng.uniform(0.002, 0.008))
+        n_particles = 30
+        diffusion = float(rng.uniform(0.004, 0.010))
+        pos = rng.uniform([0.25, 0.1], [0.75, 0.35], size=(n_particles, 2))
+        vel = rng.normal(0.0, 0.005, size=(n_particles, 2))
+        prad = 0.018
+        frames, states = [], []
+        keys = _state_keys(1)
+        prev_cv = vel.mean(0).copy()
+        for _t in range(self.num_frames):
+            vel[:, 1] += gravity
+            vel += rng.normal(0.0, diffusion, size=vel.shape)  # stochastic (fluid-like) forcing
+            pos += vel
+            # reflect off walls
+            for ax in range(2):
+                lo, hi = prad, 1.0 - prad
+                under, over = pos[:, ax] < lo, pos[:, ax] > hi
+                pos[under, ax] = lo; vel[under, ax] *= -0.5
+                pos[over, ax] = hi; vel[over, ax] *= -0.5
+            bodies = [Body(pos[k], vel[k], prad, prad**2, (0.3, 0.55, 0.95)) for k in range(n_particles)]
+            frames.append(_render(bodies, self.image_size))
+            centroid = pos.mean(0)
+            cv = vel.mean(0)
+            cacc = cv - prev_cv
+            prev_cv = cv.copy()
+            spread = float(np.sqrt(((pos - centroid) ** 2).sum(1).mean()))
+            per_obj = [self._obj_dict(centroid, cv, cacc, spread, float(n_particles), True)]
+            states.append(_pack_state(per_obj, 1, gravity, 0.0))
+        return self._finish(frames, states, keys, scenario="fluid", gravity=gravity,
+                            extra={"n_particles": n_particles, "diffusion": diffusion})
 
     # -- core integrator ------------------------------------------------------------------------
     def _simulate(

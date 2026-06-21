@@ -1,0 +1,12 @@
+# Step 2: solid-mechanics synthetic dataset (rigid-body dynamics) with exact ground-truth state.
+# Use for quantity probes: velocity, acceleration, gravity, collision.
+name: synthetic_physics
+root: null
+image_size: 64
+num_frames: 16
+fps: 8
+categories: all
+split: train
+num_clips: 256
+scenarios: [free_fall, projectile, bouncing_ball, collision]
+seed: 0

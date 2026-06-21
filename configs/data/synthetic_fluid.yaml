@@ -1,0 +1,12 @@
+# Step 2: fluid-like synthetic dataset (diffusive particle swarm) with exact aggregate state.
+# Pair with synthetic_solid to study the rigid-vs-fluid subspace separation (Step 1/Step 2).
+name: synthetic_physics
+root: null
+image_size: 64
+num_frames: 16
+fps: 8
+categories: all
+split: train
+num_clips: 256
+scenarios: [fluid]
+seed: 0

@@ -1,0 +1,105 @@
+#!/usr/bin/env python
+"""Step 1: probe whether physics *categories* form distinct subspaces in the VJEPA latent space.
+
+Runs linear + MLP category classifiers per encoder layer (with shuffled-label and pixel/appearance
+controls), then characterises the geometry: per-category direction cosines, principal angles between
+category subspaces, and classifier-free separability. The linear probe's per-class weight vectors are
+saved as ``category_directions.npz`` — these are the candidate steering directions reused in Step 3.
+
+Example
+-------
+    python scripts/probe_categories.py \
+        --latent_dir outputs/latents/physics_iq/vjepa2_large \
+        --output_dir outputs/analysis/physics_iq/category_probe
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import _bootstrap  # noqa: F401
+import numpy as np
+
+from src.analysis import subspace
+from src.analysis import visualization as viz
+from src.analysis.latent_geometry import pooled_features
+from src.training.probe_classification import classify_categories
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--latent_dir", required=True)
+    p.add_argument("--output_dir", required=True)
+    p.add_argument("--layers", default="all", help='"all" or comma-separated layer indices')
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no_pixel_baseline", action="store_true")
+    p.add_argument("--subspace_layer", type=int, default=-1,
+                   help="layer for subspace geometry; -1 = deepest available")
+    args = p.parse_args()
+
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    layers = "all" if args.layers == "all" else [int(x) for x in args.layers.split(",")]
+
+    result = classify_categories(
+        args.latent_dir, layers=layers, seed=args.seed,
+        output_csv=out / "category_decodability.csv",
+        pixel_baseline=not args.no_pixel_baseline,
+    )
+    records = result["records"]
+    if records:
+        viz.classification_by_layer_plot(records, out / "category_accuracy_by_layer.png")
+
+    # Per-layer confusion matrices (linear probe, out-of-fold).
+    for layer, cm in result["confusions"].items():
+        if cm["matrix"] is not None:
+            viz.confusion_matrix_plot(
+                cm["matrix"], cm["classes"], out / f"confusion_layer{layer:02d}.png",
+                title=f"Category confusion (layer {layer}, linear)")
+
+    # Save the per-class linear directions (steering-direction bridge to Step 3).
+    if result["directions"]:
+        np.savez(
+            out / "category_directions.npz",
+            **{f"layer{li}_classes": np.asarray(d["classes"]) for li, d in result["directions"].items()},
+            **{f"layer{li}_coef": d["coef"] for li, d in result["directions"].items()},
+        )
+
+    # Subspace geometry at the chosen layer.
+    avail = list({r["layer"] for r in records if r["layer"] >= 0})
+    sub_layer = max(avail) if args.subspace_layer < 0 else args.subspace_layer
+    feats, cats = pooled_features(args.latent_dir, sub_layer)
+    classes, means = subspace.category_directions(feats, cats)
+    cos = subspace.cosine_matrix(means)
+    pa_classes, angles = subspace.principal_angles(feats, cats)
+    sep = subspace.separability(feats, cats)
+
+    viz.similarity_heatmap(cos, classes, out / f"category_cosine_layer{sub_layer:02d}.png",
+                           title=f"Category direction cosine (layer {sub_layer})")
+    viz.similarity_heatmap(angles, pa_classes, out / f"category_angles_layer{sub_layer:02d}.png",
+                           title=f"Principal angles (rad, layer {sub_layer})", vmin=0.0,
+                           vmax=float(np.pi / 2), cmap="viridis")
+
+    summary = {
+        "latent_dir": str(args.latent_dir),
+        "subspace_layer": int(sub_layer),
+        "categories": classes,
+        "separability": {k: round(float(v), 4) for k, v in sep.items()},
+        "best_linear": max((r for r in records if r["probe"] == "linear" and r["layer"] >= 0),
+                           key=lambda r: r["accuracy"], default=None),
+        "best_mlp": max((r for r in records if r["probe"] == "mlp" and r["layer"] >= 0),
+                        key=lambda r: r["accuracy"], default=None),
+        "pixel_baseline": [r for r in records if str(r["probe"]).startswith("pixel_")],
+    }
+    (out / "category_probe_summary.json").write_text(json.dumps(summary, indent=2))
+    print(f"[probe_categories] {len(records)} probe rows; subspace@layer{sub_layer} -> {out}")
+    if summary["best_linear"]:
+        b = summary["best_linear"]
+        print(f"[probe_categories] best linear acc={b['accuracy']} @layer{b['layer']} "
+              f"(shuffled ctrl={b['ctrl_shuffled_label_accuracy']}), fisher={sep.get('fisher_ratio')}")
+
+
+if __name__ == "__main__":
+    main()

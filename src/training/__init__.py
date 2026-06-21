@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .checkpoints import EMA, load_checkpoint, save_checkpoint
+from .probe_classification import classify_categories
 from .schedulers import build_scheduler
 from .train_decoder import train_decoder
 from .train_probe import probe_layers
@@ -10,6 +11,7 @@ from .train_probe import probe_layers
 __all__ = [
     "train_decoder",
     "probe_layers",
+    "classify_categories",
     "build_scheduler",
     "EMA",
     "save_checkpoint",

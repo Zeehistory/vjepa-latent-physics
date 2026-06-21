@@ -62,7 +62,8 @@ class SyntheticPhysicsDataset(Dataset):
 
     def __init__(self, cfg: Any, encoder_image_size: int, encoder_frames: int | None) -> None:
         scenarios = list(cfg.scenarios) if cfg.scenarios != "all" else [
-            "bouncing_ball", "projectile", "collision", "pendulum", "two_body", "occlusion"
+            "bouncing_ball", "projectile", "free_fall", "collision", "pendulum", "two_body",
+            "occlusion", "fluid",
         ]
         self.gen = SyntheticPhysics(
             image_size=cfg.image_size,

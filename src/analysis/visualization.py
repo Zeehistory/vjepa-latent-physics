@@ -130,6 +130,125 @@ def layerwise_probe_plot(records: list[dict], path: str | Path) -> Path:
     return path
 
 
+def confusion_matrix_plot(
+    matrix: np.ndarray, labels: list[str], path: str | Path, title: str = "Confusion (out-of-fold)"
+) -> Path:
+    """Row-normalised confusion-matrix heatmap (rows = true class, cols = predicted)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    m = np.asarray(matrix, dtype=float)
+    m = m / (m.sum(1, keepdims=True) + 1e-12)
+    fig, ax = plt.subplots(figsize=(0.7 * len(labels) + 2, 0.7 * len(labels) + 1.6))
+    im = ax.imshow(m, cmap="Blues", vmin=0, vmax=1)
+    ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, fontsize=7)
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            ax.text(j, i, f"{m[i, j]:.2f}", ha="center", va="center", fontsize=6,
+                    color="white" if m[i, j] > 0.5 else "black")
+    ax.set_xlabel("predicted"); ax.set_ylabel("true")
+    fig.colorbar(im, ax=ax, fraction=0.046)
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def similarity_heatmap(
+    matrix: np.ndarray, labels: list[str], path: str | Path, title: str = "Cosine",
+    vmin: float = -1.0, vmax: float = 1.0, cmap: str = "RdBu_r",
+) -> Path:
+    """Diverging heatmap for signed similarity / angle matrices (cosines, principal angles)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(0.7 * len(labels) + 2, 0.7 * len(labels) + 1.6))
+    im = ax.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_xticks(range(len(labels))); ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=7)
+    ax.set_yticks(range(len(labels))); ax.set_yticklabels(labels, fontsize=7)
+    for i in range(len(labels)):
+        for j in range(len(labels)):
+            ax.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center", fontsize=6)
+    fig.colorbar(im, ax=ax, fraction=0.046)
+    ax.set_title(title)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def classification_by_layer_plot(records: list[dict], path: str | Path) -> Path:
+    """Accuracy vs encoder depth for linear/MLP probes, with the shuffled-label control band.
+
+    Physics (not appearance) structure should show accuracy that *rises with depth*; a flat line near
+    the pixel baseline means the probe is reading appearance.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for probe in ("linear", "mlp"):
+        pts = sorted([r for r in records if r["probe"] == probe and r["layer"] >= 0],
+                     key=lambda r: r["layer"])
+        if pts:
+            ls = "-" if probe == "linear" else "--"
+            ax.plot([p["layer"] for p in pts], [p["accuracy"] for p in pts], ls, marker="o", ms=4,
+                    label=f"{probe} accuracy")
+            ax.plot([p["layer"] for p in pts], [p["ctrl_shuffled_label_accuracy"] for p in pts],
+                    ls, color="gray", alpha=0.5, lw=1, label=f"{probe} shuffled ctrl")
+    # pixel + control reference lines
+    pix = [r for r in records if str(r["probe"]).startswith("pixel_")]
+    for r in pix:
+        ax.axhline(r["accuracy"], color="green", ls=":", lw=1, alpha=0.7,
+                   label=f"{r['probe']} (appearance)")
+    ax.set_xlabel("encoder layer"); ax.set_ylabel("category accuracy")
+    ax.set_title("Category separability by depth")
+    ax.legend(fontsize=7, ncol=2); ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def steering_sweep_plot(
+    sweeps: dict[str, list[dict]], path: str | Path, xkey: str = "alpha", ykey: str = "readout",
+    title: str = "Steering controllability", ylabel: str = "decoded readout",
+) -> Path:
+    """Plot one or more α-sweep curves (readout vs intervention strength). Monotonic = controllable."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(6, 4.2))
+    for name, rows in sweeps.items():
+        rows = sorted(rows, key=lambda r: r[xkey])
+        ax.plot([r[xkey] for r in rows], [r[ykey] for r in rows], marker="o", ms=4, label=name)
+    ax.axvline(0.0, color="gray", lw=0.8)
+    ax.set_xlabel("intervention strength α"); ax.set_ylabel(ylabel)
+    ax.set_title(title); ax.legend(fontsize=8); ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
+def steering_filmstrip(
+    frames_by_alpha: dict[float, "torch.Tensor"], path: str | Path, frame_idx: int = -1
+) -> Path:
+    """One row of decoded frames across α values (a single timestep), to eyeball the steered edit."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    alphas = sorted(frames_by_alpha)
+    imgs = [_to_hwc(frames_by_alpha[a])[frame_idx] for a in alphas]
+    fig, axes = plt.subplots(1, len(alphas), figsize=(1.6 * len(alphas), 1.9))
+    if len(alphas) == 1:
+        axes = [axes]
+    for ax, a, im in zip(axes, alphas, imgs):
+        ax.imshow(im); ax.axis("off"); ax.set_title(f"α={a:g}", fontsize=8)
+    fig.suptitle("Steered decode (α sweep)")
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
 def cka_heatmap(matrix: np.ndarray, labels: list[str], path: str | Path, title: str = "CKA") -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
