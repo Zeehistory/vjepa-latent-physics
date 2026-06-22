@@ -47,6 +47,24 @@ def apply_intervention(
 
 
 @torch.no_grad()
+def apply_intervention_multi(
+    latents: dict[int, torch.Tensor],
+    directions: dict[int, torch.Tensor],
+    alpha: float,
+) -> dict[int, torch.Tensor]:
+    """Add ``alpha * directions[L]`` to every token of each layer ``L`` in ``directions``.
+
+    Generalises :func:`apply_intervention` to steer several layers at once (the per-layer vectors are
+    expected to already carry their intended magnitude — e.g. scaled by each layer's token norm).
+    Layers absent from ``directions`` are passed through unchanged so the decoder still sees them.
+    """
+    out = {k: v.clone() for k, v in latents.items()}
+    for layer, d in directions.items():
+        out[layer] = out[layer] + alpha * d.view(1, 1, -1).to(out[layer].device)
+    return out
+
+
+@torch.no_grad()
 def intervention_sweep(
     decoder,
     latents: dict[int, torch.Tensor],

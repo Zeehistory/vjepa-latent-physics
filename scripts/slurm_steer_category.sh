@@ -13,20 +13,27 @@
 #   * the category probe directions (slurm_probe_categories.sh -> category_directions.npz)
 #   * Physics-IQ latents and a trained transformer decoder.
 #
-# Defaults reflect the Phase-A/B findings: use the RAW probe directions (raw separates as well as
-# z-scored, so the directions live in the decoder's native latent space) at LAYER -1 = the deepest
-# cached layer (23), where raw is strongest and solid<->fluid are most anti-aligned (cos=-0.70).
-# ALPHAS includes negatives as a control: P(solid) should DROP for alpha<0 and RISE for alpha>0.
-# Keep the sweep gentle — separability is thin (Fisher~0.12), so large alpha goes off-distribution fast.
+# Defaults reflect the Phase-A/B/C findings. Steering only the deepest layer's probe weights moved the
+# readout but not the pixels (decoder ignored the edit until alpha broke the decode into mush), so the
+# defaults now use METHOD=diff_means (class-centroid translation, decoder-renderable) + ALL_LAYERS=1
+# (steer every cached layer). ALPHAS are a FRACTION of each layer's per-token norm (1.0 == one token
+# norm), so the sweep is comparable across layers. Set METHOD=probe / ALL_LAYERS=0 to reproduce the
+# discriminative single-layer variant. For METHOD=probe, DIRECTIONS must point at category_directions.npz.
 TARGET_LATENT_DIR=${TARGET_LATENT_DIR:-"/home/zss8/project_pi_jks79/zss8/vjepa/outputs/latents/physics_iq/vjepa2_large"}
 DIRECTIONS=${DIRECTIONS:-"/home/zss8/project_pi_jks79/zss8/vjepa/outputs/analysis/physics_iq/category_probe/raw/category_directions.npz"}
 CHECKPOINT=${CHECKPOINT:-"/home/zss8/project_pi_jks79/zss8/vjepa/outputs/runs/physics_iq_decoder_large/checkpoints/last.pt"}
+METHOD=${METHOD:-"diff_means"}
+ALL_LAYERS=${ALL_LAYERS:-"1"}
 FROM_CATEGORY=${FROM_CATEGORY:-"fluid_dynamics"}
 TO_CATEGORY=${TO_CATEGORY:-"solid_mechanics"}
 LAYER=${LAYER:-"-1"}
-ALPHAS=${ALPHAS:-"-4,-2,0,2,4,6,8"}
+ALPHAS=${ALPHAS:-"0,0.25,0.5,0.75,1.0,1.5"}
 NUM_SAMPLES=${NUM_SAMPLES:-"4"}
-OUTPUT_DIR=${OUTPUT_DIR:-"/home/zss8/project_pi_jks79/zss8/vjepa/outputs/analysis/steer_category/${FROM_CATEGORY}_to_${TO_CATEGORY}"}
+OUTPUT_DIR=${OUTPUT_DIR:-"/home/zss8/project_pi_jks79/zss8/vjepa/outputs/analysis/steer_category/${FROM_CATEGORY}_to_${TO_CATEGORY}_${METHOD}"}
+
+# --all_layers is a store_true flag; include it only when ALL_LAYERS=1.
+ALL_LAYERS_FLAG=""
+[ "$ALL_LAYERS" = "1" ] && ALL_LAYERS_FLAG="--all_layers"
 
 module purge
 module load miniconda
@@ -40,6 +47,8 @@ python scripts/steer_category.py \
     --target_latent_dir "$TARGET_LATENT_DIR" \
     --directions "$DIRECTIONS" \
     --checkpoint "$CHECKPOINT" \
+    --method "$METHOD" \
+    $ALL_LAYERS_FLAG \
     --from_category "$FROM_CATEGORY" \
     --to_category "$TO_CATEGORY" \
     --layer="$LAYER" \

@@ -185,6 +185,35 @@ def category_steering_direction(
     return (d_raw / norm).astype(np.float32), info
 
 
+def category_mean_direction(
+    latent_dir: str | Path, layer: int, from_category: str, to_category: str
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Difference-of-class-means steering direction at ``layer``: ``mean(to) - mean(from)``.
+
+    Unlike the probe's *discriminative* weight vector (max-margin, often along low-variance nuisance
+    dims), this is the actual **translation** in latent space from the ``from_category`` cloud's centroid
+    to the ``to_category`` cloud's — the vector a generative decoder is far more likely to render. Both
+    centroids are clip-level mean-pooled latents from ``latent_dir``. Returns ``(unit_direction, info)``.
+    """
+    ds = LatentDataset(latent_dir, layers=[layer])
+    pos, neg = [], []
+    for i in range(len(ds)):
+        s = ds[i]
+        f = s["layers"][layer].numpy().mean(0)
+        if s["category"] == to_category:
+            pos.append(f)
+        elif s["category"] == from_category:
+            neg.append(f)
+    if not pos or not neg:
+        raise ValueError(f"Need both '{from_category}' ({len(neg)}) and '{to_category}' ({len(pos)}) "
+                         f"clips in {latent_dir} at layer {layer}.")
+    d = np.mean(pos, 0) - np.mean(neg, 0)
+    norm = float(np.linalg.norm(d) + 1e-12)
+    info = {"from_category": from_category, "to_category": to_category, "n_from": len(neg),
+            "n_to": len(pos), "raw_norm": norm, "method": "diff_means"}
+    return (d / norm).astype(np.float32), info
+
+
 def category_readout(
     latent_dir: str | Path, layer: int, positive_category: str, exclude_ids: set[str] | None = None
 ) -> Callable[[np.ndarray], np.ndarray]:

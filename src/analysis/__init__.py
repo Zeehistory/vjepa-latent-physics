@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from . import robotics_steering, steering, subspace, visualization
 from .direction_codes import circular_code_score
-from .intervention import apply_intervention, discover_direction, intervention_sweep
+from .intervention import (
+    apply_intervention,
+    apply_intervention_multi,
+    discover_direction,
+    intervention_sweep,
+)
 from .latent_geometry import layerwise_cka_matrix, pca, pooled_features
 from .manifold_analysis import embed_2d, variable_axis_alignment
 from .steering import (
+    category_mean_direction,
     category_readout,
     category_steering_direction,
     decode_intervention,
@@ -26,6 +32,7 @@ __all__ = [
     "circular_code_score",
     "discover_direction",
     "apply_intervention",
+    "apply_intervention_multi",
     "intervention_sweep",
     "pooled_features",
     "pca",
@@ -38,6 +45,7 @@ __all__ = [
     "interpolate_trajectories",
     "discover_quantity_direction",
     "category_steering_direction",
+    "category_mean_direction",
     "category_readout",
     "category_directions",
     "cosine_matrix",
