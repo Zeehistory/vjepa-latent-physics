@@ -18,8 +18,9 @@ an ineffective one does not.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 import torch
@@ -149,6 +150,70 @@ def interpolate_trajectories(
     ts = np.linspace(0.0, 1.0, steps)
     keys = set(latents_fail) & set(latents_success)
     return [{k: (1 - t) * latents_fail[k] + t * latents_success[k] for k in keys} for t in ts]
+
+
+def category_steering_direction(
+    directions_npz: str | Path, layer: int, from_category: str, to_category: str
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build the raw-latent steering direction ``w_to - w_from`` from a category-probe ``.npz``.
+
+    The ``.npz`` is produced by :mod:`scripts.probe_categories` and holds, per layer, the linear probe's
+    per-class weight vectors (``layer{L}_coef``), the class order (``layer{L}_classes``), and the feature
+    mean/std the probe saw (``layer{L}_std``). If the probe was standardized, the weight vectors live in
+    z-scored space and the equivalent *raw-latent* direction is ``coef / std`` (because a standardized
+    score ``w·(x-mu)/sigma`` equals ``(w/sigma)·x + const``). We therefore return
+
+        d_raw = (w_to - w_from) / std        (std = 1 for a --no_standardize probe),
+
+    normalized to unit L2 — the direction to add to raw latents so a clip reads more like ``to_category``
+    and less like ``from_category`` (e.g. fluid -> solid). Returns ``(unit_direction (D,), info)``.
+    """
+    data = np.load(Path(directions_npz), allow_pickle=False)
+    classes = [str(c) for c in data[f"layer{layer}_classes"]]
+    coef = data[f"layer{layer}_coef"]  # (C, D)
+    std = data[f"layer{layer}_std"] if f"layer{layer}_std" in data else np.ones(coef.shape[1], np.float32)
+    for c in (from_category, to_category):
+        if c not in classes:
+            raise ValueError(f"Category '{c}' not among probe classes {classes} at layer {layer}.")
+    w_to = coef[classes.index(to_category)]
+    w_from = coef[classes.index(from_category)]
+    d_raw = (w_to - w_from) / (std + 1e-8)
+    norm = float(np.linalg.norm(d_raw) + 1e-12)
+    info = {"classes": classes, "from_category": from_category, "to_category": to_category,
+            "standardized": bool(data["standardized"]) if "standardized" in data else None,
+            "raw_norm": norm}
+    return (d_raw / norm).astype(np.float32), info
+
+
+def category_readout(
+    latent_dir: str | Path, layer: int, positive_category: str, exclude_ids: set[str] | None = None
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Independent probe-free check: fit a standardized one-vs-rest logistic for ``positive_category``.
+
+    Returns ``predict(x (M,D)) -> P(positive_category) (M,)``. Fit on the *target* cache's pooled latents
+    (optionally excluding the clips being steered, to keep the readout independent of them), so tracking
+    this probability along the ``alpha`` sweep is a genuine — not circular — controllability signal.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    ds = LatentDataset(latent_dir, layers=[layer])
+    feats, y = [], []
+    for i in range(len(ds)):
+        s = ds[i]
+        if exclude_ids and s["id"] in exclude_ids:
+            continue
+        feats.append(s["layers"][layer].numpy().mean(0))
+        y.append(1 if s["category"] == positive_category else 0)
+    X = np.stack(feats, 0)
+    yv = np.asarray(y)
+    mu, sd = X.mean(0, keepdims=True), X.std(0, keepdims=True) + 1e-8
+    model = LogisticRegression(max_iter=5000, C=1.0, class_weight="balanced").fit((X - mu) / sd, yv)
+    pos_col = list(model.classes_).index(1)
+
+    def predict(x: np.ndarray) -> np.ndarray:
+        return model.predict_proba((x - mu) / sd)[:, pos_col]
+
+    return predict
 
 
 def discover_quantity_direction(

@@ -8,6 +8,8 @@ from .intervention import apply_intervention, discover_direction, intervention_s
 from .latent_geometry import layerwise_cka_matrix, pca, pooled_features
 from .manifold_analysis import embed_2d, variable_axis_alignment
 from .steering import (
+    category_readout,
+    category_steering_direction,
     decode_intervention,
     discover_quantity_direction,
     interpolate_trajectories,
@@ -35,6 +37,8 @@ __all__ = [
     "steer_to_target",
     "interpolate_trajectories",
     "discover_quantity_direction",
+    "category_steering_direction",
+    "category_readout",
     "category_directions",
     "cosine_matrix",
     "principal_angles",

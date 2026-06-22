@@ -84,7 +84,7 @@ def _group_shuffle(y: np.ndarray, groups: np.ndarray, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     uniq = np.unique(groups)
     glabel = np.array([y[groups == g][0] for g in uniq])
-    mapping = dict(zip(uniq, glabel[rng.permutation(len(uniq))]))
+    mapping = dict(zip(uniq, glabel[rng.permutation(len(uniq))], strict=False))
     return np.array([mapping[g] for g in groups])
 
 
@@ -108,16 +108,40 @@ def _predict_oof(model, X: np.ndarray, y: np.ndarray, groups: np.ndarray | None,
         return cross_val_predict(model, X, y, cv=cv, groups=groups)
 
 
-def _fit_eval_clf(
-    X: np.ndarray, y: np.ndarray, groups: np.ndarray | None, kind: str, seed: int, n_splits: int,
-    shuffle_labels: bool,
-) -> dict[str, Any]:
-    """Scenario-grouped CV accuracy + macro-F1, out-of-fold confusion, and (linear) weight directions."""
+def _make_estimator(kind: str, seed: int):
+    """A single linear/MLP estimator (no scaler — scaling is composed in by ``_make_model``)."""
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
     from sklearn.neural_network import MLPClassifier
+
+    if kind == "linear":
+        # Raw (unstandardized) latents can be ill-conditioned, so allow more iterations regardless.
+        return LogisticRegression(max_iter=5000, C=1.0, class_weight="balanced")
+    return MLPClassifier(hidden_layer_sizes=(128, 128), max_iter=600, random_state=seed,
+                         early_stopping=True)
+
+
+def _make_model(kind: str, seed: int, standardize: bool):
+    """Estimator, optionally preceded by a z-score :class:`StandardScaler`.
+
+    ``standardize=False`` feeds *raw* latent values to the classifier. This is the un-normalized probe:
+    it answers "which raw subspace encodes the category" without the per-dimension rescaling that
+    StandardScaler applies (which can distort the geometry, inflating low-variance dims). The standardized
+    and raw weight vectors are related by ``w_raw = w_std / sigma`` (see ``feat_std`` saved with the
+    directions), so a standardized run can also be inverse-mapped into raw space after the fact.
+    """
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
+
+    est = _make_estimator(kind, seed)
+    return make_pipeline(StandardScaler(), est) if standardize else make_pipeline(est)
+
+
+def _fit_eval_clf(
+    X: np.ndarray, y: np.ndarray, groups: np.ndarray | None, kind: str, seed: int, n_splits: int,
+    shuffle_labels: bool, standardize: bool = True,
+) -> dict[str, Any]:
+    """Scenario-grouped CV accuracy + macro-F1, out-of-fold confusion, and (linear) weight directions."""
+    from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
 
     if shuffle_labels:
         y = _group_shuffle(y, groups, seed) if groups is not None else \
@@ -128,12 +152,7 @@ def _fit_eval_clf(
         return {"accuracy": float("nan"), "macro_f1": float("nan"),
                 "classes": classes, "confusion": None, "coef": None}
 
-    if kind == "linear":
-        est = LogisticRegression(max_iter=2000, C=1.0, class_weight="balanced")
-    else:
-        est = MLPClassifier(hidden_layer_sizes=(128, 128), max_iter=600, random_state=seed,
-                            early_stopping=True)
-    model = make_pipeline(StandardScaler(), est)
+    model = _make_model(kind, seed, standardize)
     pred = _predict_oof(model, X, y, groups, n_splits, seed)
     acc = float(accuracy_score(y, pred))
     f1 = float(f1_score(y, pred, average="macro"))
@@ -141,10 +160,19 @@ def _fit_eval_clf(
 
     coef = None
     if kind == "linear" and not shuffle_labels:
-        full = make_pipeline(StandardScaler(), LogisticRegression(
-            max_iter=2000, C=1.0, class_weight="balanced")).fit(X, y)
+        full = _make_model("linear", seed, standardize).fit(X, y)
         coef = full.named_steps["logisticregression"].coef_.astype(np.float32)
     return {"accuracy": acc, "macro_f1": f1, "classes": classes, "confusion": cm, "coef": coef}
+
+
+def _filter_to_categories(
+    X: np.ndarray, y: np.ndarray, groups: np.ndarray, categories: list[str] | None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Keep only rows whose label is in ``categories`` (explicit allow-list; ``None`` keeps all)."""
+    if not categories:
+        return X, y, groups
+    mask = np.isin(y, list(categories))
+    return X[mask], y[mask], groups[mask]
 
 
 def classify_categories(
@@ -155,12 +183,20 @@ def classify_categories(
     pixel_baseline: bool = True,
     min_scenarios_per_class: int = 4,
     group_by_scenario: bool = True,
+    standardize: bool = True,
+    categories: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run linear + MLP category classifiers per layer with scenario-grouped CV + controls.
 
+    ``standardize`` toggles the per-dimension z-scoring (StandardScaler) in front of every classifier;
+    ``False`` runs the probe on raw latent values. ``categories`` is an explicit allow-list of category
+    slugs to investigate (e.g. drop thermodynamics/magnetism, which have too few scenarios for valid
+    grouped CV anyway). ``None`` keeps every category that survives ``min_scenarios_per_class``.
+
     Returns ``records`` (rows per layer x probe), ``confusions`` (per-layer linear out-of-fold matrix),
-    ``directions`` (per-layer linear per-class weight vectors — Step-3 steering candidates), and ``meta``
-    (kept/dropped categories, fold count, majority baseline).
+    ``directions`` (per-layer linear per-class weight vectors + the feature mean/std used, so the raw
+    steering direction is recoverable as ``coef / std`` — Step-3 candidates), and ``meta`` (kept/dropped
+    categories, fold count, majority baseline, standardize/category settings).
     """
     dataset = LatentDataset(latent_dir, layers="all")
     available = dataset.available_layers()
@@ -172,6 +208,7 @@ def classify_categories(
     meta: dict[str, Any] = {}
 
     def _run(X, y, groups, layer_tag, probe_prefix=""):
+        X, y, groups = _filter_to_categories(X, y, groups, categories)
         if group_by_scenario:
             X, y, groups, keep, dropped = _filter_classes(X, y, groups, min_scenarios_per_class)
             n_splits = _grouped_n_splits(y, groups) if len(set(y.tolist())) >= 2 else 2
@@ -182,20 +219,29 @@ def classify_categories(
             meta.update({"kept_categories": keep, "dropped_categories": dropped,
                          "n_splits": int(n_splits), "n_samples": int(len(y)),
                          "majority_rate": round(float(counts.max() / counts.sum()), 4),
-                         "group_by_scenario": group_by_scenario})
+                         "group_by_scenario": group_by_scenario, "standardize": standardize,
+                         "categories_filter": list(categories) if categories else None})
         for kind in ("linear", "mlp"):
-            real = _fit_eval_clf(X, y, groups, kind, seed, n_splits, shuffle_labels=False)
-            ctrl = _fit_eval_clf(X, y, groups, kind, seed, n_splits, shuffle_labels=True)
+            real = _fit_eval_clf(X, y, groups, kind, seed, n_splits, shuffle_labels=False,
+                                 standardize=standardize)
+            ctrl = _fit_eval_clf(X, y, groups, kind, seed, n_splits, shuffle_labels=True,
+                                 standardize=standardize)
             records.append({
                 "layer": layer_tag, "probe": f"{probe_prefix}{kind}",
                 "accuracy": round(real["accuracy"], 4), "macro_f1": round(real["macro_f1"], 4),
                 "ctrl_shuffled_label_accuracy": round(ctrl["accuracy"], 4),
                 "n_classes": len(real["classes"]), "n_samples": int(len(y)),
+                "standardize": standardize,
             })
             if probe_prefix == "" and kind == "linear":
                 confusions[layer_tag] = {"matrix": real["confusion"], "classes": real["classes"]}
                 if real["coef"] is not None:
-                    directions[layer_tag] = {"classes": real["classes"], "coef": real["coef"]}
+                    # Save the feature mean/std so the raw-space direction (coef/std) is recoverable
+                    # even from a standardized run; for a raw run std=1 and coef is already raw-space.
+                    std = X.std(0).astype(np.float32) if standardize else np.ones(X.shape[1], np.float32)
+                    directions[layer_tag] = {"classes": real["classes"], "coef": real["coef"],
+                                             "mean": X.mean(0).astype(np.float32), "std": std,
+                                             "standardized": bool(standardize)}
 
     for layer in layer_list:
         X, y, ids = _load_pooled(latent_dir, layer)

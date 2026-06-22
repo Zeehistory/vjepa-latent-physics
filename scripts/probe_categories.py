@@ -39,6 +39,12 @@ def main() -> None:
                    help="drop categories with fewer distinct scenarios (need >= for valid grouped CV)")
     p.add_argument("--no_group", action="store_true",
                    help="disable scenario-grouped CV (NOT recommended — leaks scenarios across folds)")
+    p.add_argument("--no_standardize", action="store_true",
+                   help="probe RAW latent values (skip StandardScaler z-scoring) to study which raw "
+                        "subspace encodes the category without per-dim rescaling distortion")
+    p.add_argument("--categories", default="solid_mechanics,fluid_dynamics,optics",
+                   help='explicit category allow-list (comma-separated); "" keeps all. Default drops '
+                        "thermodynamics + magnetism (too few scenarios for valid grouped CV)")
     p.add_argument("--subspace_layer", type=int, default=-1,
                    help="layer for subspace geometry; -1 = deepest available")
     args = p.parse_args()
@@ -46,6 +52,8 @@ def main() -> None:
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     layers = "all" if args.layers == "all" else [int(x) for x in args.layers.split(",")]
+    categories = [c for c in args.categories.split(",") if c] or None
+    standardize = not args.no_standardize
 
     result = classify_categories(
         args.latent_dir, layers=layers, seed=args.seed,
@@ -53,6 +61,8 @@ def main() -> None:
         pixel_baseline=not args.no_pixel_baseline,
         min_scenarios_per_class=args.min_scenarios_per_class,
         group_by_scenario=not args.no_group,
+        standardize=standardize,
+        categories=categories,
     )
     records = result["records"]
     if records:
@@ -65,22 +75,31 @@ def main() -> None:
                 cm["matrix"], cm["classes"], out / f"confusion_layer{layer:02d}.png",
                 title=f"Category confusion (layer {layer}, linear)")
 
-    # Save the per-class linear directions (steering-direction bridge to Step 3).
+    # Save the per-class linear directions (steering-direction bridge to Step 3). We also persist the
+    # feature mean/std the probe saw, so the *raw-space* steering direction is recoverable as coef/std
+    # (for a --no_standardize run std=1 and coef is already raw-space). ``standardized`` records which.
     if result["directions"]:
         np.savez(
             out / "category_directions.npz",
+            standardized=np.asarray(standardize),
             **{f"layer{li}_classes": np.asarray(d["classes"]) for li, d in result["directions"].items()},
             **{f"layer{li}_coef": d["coef"] for li, d in result["directions"].items()},
+            **{f"layer{li}_mean": d["mean"] for li, d in result["directions"].items()},
+            **{f"layer{li}_std": d["std"] for li, d in result["directions"].items()},
         )
 
     # Subspace geometry at the chosen layer.
     avail = list({r["layer"] for r in records if r["layer"] >= 0})
     sub_layer = max(avail) if args.subspace_layer < 0 else args.subspace_layer
     feats, cats = pooled_features(args.latent_dir, sub_layer)
-    classes, means = subspace.category_directions(feats, cats)
+    if categories:  # mirror the classifier's allow-list so the geometry matches the probe
+        cats_arr = np.asarray(cats)
+        mask = np.isin(cats_arr, categories)
+        feats, cats = feats[mask], cats_arr[mask].tolist()
+    classes, means = subspace.category_directions(feats, cats, standardize=standardize)
     cos = subspace.cosine_matrix(means)
-    pa_classes, angles = subspace.principal_angles(feats, cats)
-    sep = subspace.separability(feats, cats)
+    pa_classes, angles = subspace.principal_angles(feats, cats, standardize=standardize)
+    sep = subspace.separability(feats, cats, standardize=standardize)
 
     viz.similarity_heatmap(cos, classes, out / f"category_cosine_layer{sub_layer:02d}.png",
                            title=f"Category direction cosine (layer {sub_layer})")

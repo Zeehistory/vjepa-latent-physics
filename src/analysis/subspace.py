@@ -19,13 +19,26 @@ from __future__ import annotations
 import numpy as np
 
 
-def category_directions(features: np.ndarray, labels: list[str]) -> tuple[list[str], np.ndarray]:
-    """Return ``(sorted_labels, means)`` where ``means[i]`` is the standardised mean of class ``i``.
+def _prep(features: np.ndarray, standardize: bool) -> np.ndarray:
+    """Z-score the features (``standardize=True``) or return them raw.
 
-    Features are z-scored over the dataset first so the cosine geometry is not dominated by a few
-    high-variance dimensions.
+    Z-scoring keeps the geometry from being dominated by a few high-variance dimensions, but it also
+    rescales every axis and so *distorts* the raw subspace structure. ``standardize=False`` measures the
+    geometry of the latent space as the encoder actually produces it.
     """
-    f = (features - features.mean(0, keepdims=True)) / (features.std(0, keepdims=True) + 1e-8)
+    if not standardize:
+        return features
+    return (features - features.mean(0, keepdims=True)) / (features.std(0, keepdims=True) + 1e-8)
+
+
+def category_directions(
+    features: np.ndarray, labels: list[str], standardize: bool = True
+) -> tuple[list[str], np.ndarray]:
+    """Return ``(sorted_labels, means)`` where ``means[i]`` is the mean latent of class ``i``.
+
+    With ``standardize=True`` features are z-scored first (default); ``False`` uses raw latent values.
+    """
+    f = _prep(features, standardize)
     classes = sorted(set(labels))
     lab = np.asarray(labels)
     means = np.stack([f[lab == c].mean(0) for c in classes], 0)
@@ -38,14 +51,16 @@ def cosine_matrix(means: np.ndarray) -> np.ndarray:
     return norm @ norm.T
 
 
-def separability(features: np.ndarray, labels: list[str]) -> dict[str, float]:
+def separability(features: np.ndarray, labels: list[str], standardize: bool = True) -> dict[str, float]:
     """Classifier-free separability of the categories.
 
     * ``fisher_ratio`` = trace(between-class scatter) / trace(within-class scatter); >1 means classes
       are spread farther apart than they are internally diffuse.
     * ``silhouette`` = mean silhouette score (cosine) over clips; higher = tighter, better-separated.
+
+    ``standardize`` toggles per-dimension z-scoring (default ``True``) vs. raw latent geometry.
     """
-    f = (features - features.mean(0, keepdims=True)) / (features.std(0, keepdims=True) + 1e-8)
+    f = _prep(features, standardize)
     lab = np.asarray(labels)
     classes = sorted(set(labels))
     mu = f.mean(0)
@@ -66,13 +81,16 @@ def separability(features: np.ndarray, labels: list[str]) -> dict[str, float]:
     return out
 
 
-def principal_angles(features: np.ndarray, labels: list[str], k: int = 5) -> tuple[list[str], np.ndarray]:
+def principal_angles(
+    features: np.ndarray, labels: list[str], k: int = 5, standardize: bool = True
+) -> tuple[list[str], np.ndarray]:
     """Mean principal angle (radians) between each pair of categories' top-``k`` PCA subspaces.
 
     Small angles -> the two categories share a subspace (overlap); angles near ``pi/2`` -> orthogonal,
     distinct subspaces. Returns ``(sorted_labels, angle_matrix (C, C))`` with zeros on the diagonal.
+    ``standardize`` toggles per-dimension z-scoring (default ``True``) vs. raw latent geometry.
     """
-    f = (features - features.mean(0, keepdims=True)) / (features.std(0, keepdims=True) + 1e-8)
+    f = _prep(features, standardize)
     lab = np.asarray(labels)
     classes = sorted(set(labels))
 
