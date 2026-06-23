@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=vjepa_vel_probe
-#SBATCH --partition=cpu
+#SBATCH --partition=gpu_rtx6000
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=3:00:00

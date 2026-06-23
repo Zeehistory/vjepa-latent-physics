@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=vjepa_ball_demos
-#SBATCH --partition=cpu
+#SBATCH --partition=gpu_rtx6000
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --time=0:30:00

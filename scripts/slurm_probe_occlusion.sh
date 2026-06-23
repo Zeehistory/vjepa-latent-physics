@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=vjepa_occ_probe
-#SBATCH --partition=cpu
+#SBATCH --partition=gpu_rtx6000
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=2:00:00
