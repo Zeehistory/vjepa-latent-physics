@@ -1,0 +1,165 @@
+\documentclass{article} % For LaTeX2e
+\usepackage{iclr2026_conference,times}
+
+% Optional math commands from https://github.com/goodfeli/dlbook_notation.
+\input{math_commands.tex}
+
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+\title{Working Notes: Decoding \& Steering Physics in Frozen V-JEPA2 Latents}
+\author{Anonymous}
+
+%\iclrfinalcopy
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\emph{Raw progress notes, not a paper draft. Numbers from cluster runs 2026-06-22 (V-JEPA2-large,
+Physics-IQ). TODO markers flag gaps.}
+\end{center}
+
+\section{What this project is}
+
+Question: do \textbf{frozen} V-JEPA2 video latents encode interpretable physics (position, velocity,
+accel, direction, gravity, collisions, object permanence), is it \emph{linearly} accessible, and can
+we \emph{steer} it?
+
+Discipline we keep separate (don't conflate): decoder reconstructs pixels $\neq$ latent contains
+physics $\neq$ linearly accessible $\neq$ model uses physical laws $\neq$ model is steerable. Every
+result carries controls: shuffled-latent, randomized-label, oracle-state, copy/mean/random-frame.
+
+\section{Pipeline (what's built \& runs)}
+
+\begin{itemize}
+\item \textbf{Encode}: frozen V-JEPA2-large (\texttt{facebook/vjepa2-vitl-fpc64-256}, ViT-L, 24
+layers), never fine-tuned.
+\item \textbf{Cache}: multi-layer token latents to disk (WebDataset shards + Parquet meta + sha256);
+probes/decoder never rerun the encoder.
+\item \textbf{Decode}: transformer video decoder, learned query tokens cross-attend frozen latents.
+Modes: latent$\rightarrow$frame, context$\rightarrow$future, latent$\rightarrow$state.
+\item \textbf{Probe}: linear + MLP per layer.
+\item \textbf{Steer}: add a learned direction to latents, re-decode, sweep $\alpha$.
+\item \textbf{Data}: Physics-IQ (real clips, no per-frame labels) + deterministic synthetic sim
+(exact per-frame ground-truth state). Step-2 synthetic = MuJoCo (rigid) + Genesis (fluid), generated
+on-cluster during extraction.
+\item Whole thing also runs offline on CPU with a deterministic mock encoder; real weights are a
+config swap. Runs record git state + hardware + checksums.
+\end{itemize}
+
+\section{Step 1 --- category probe (DONE, positive)}
+
+Linear probe on clip-pooled V-JEPA2-large latents. 3 categories kept (\texttt{fluid\_dynamics},
+\texttt{optics}, \texttt{solid\_mechanics}); thermo + magnetism dropped (too few scenarios for valid
+grouped CV). Scenario-grouped CV. Majority rate $= 0.592$.
+
+\begin{table}[h]
+\caption{Step-1 category probe. Raw $\approx$ z-scored ($\sim$1 pt) $\Rightarrow$ z-scoring is not
+manufacturing the separability. Controls collapse far below majority $\Rightarrow$ no scenario leakage.}
+\label{tab:step1}
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Probe} & \textbf{best lin.\ acc} & \textbf{macro-F1} & \textbf{best layer} & \textbf{shuffled-label ctrl} \\
+\midrule
+standardized (z-score) & 0.908 & 0.897 & 18 & 0.392 \\
+raw (no z-score)       & 0.898 & 0.887 & 23 & 0.462 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+Takeaways:
+\begin{itemize}
+\item Category structure is genuinely linear in the native latent space (answers supervisor's z-score
+worry directly). Use \textbf{raw} directions for steering (no $\sigma$ inverse-map needed).
+\item Peak layer differs by run (std=18, raw=23) --- pick steering layer from the full curve, not the
+argmax.
+\end{itemize}
+
+\paragraph{Geometry (deepest layer).} Per-class raw-space direction cosines:
+fluid$\leftrightarrow$solid $=-0.702$ (most anti-aligned), optics$\leftrightarrow$solid $=-0.482$,
+fluid$\leftrightarrow$optics $=-0.287$. So fluid$\rightarrow$solid is the cleanest contrast to steer.
+But classifier-free separation is \emph{low}: Fisher ratio $\approx 0.11$, silhouette $\approx 0.09$
+--- thin discriminative direction, not separated blobs. Foreshadows that steering is fragile.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.65\linewidth]{figures/category_accuracy_by_layer.png}
+\caption{Layerwise category-probe accuracy (linear vs.\ MLP, with shuffled-label and pixel/appearance
+baselines). Linear $\geq$ MLP at every depth, both climb with depth and sit far above the 0.592
+majority and the controls. \textbf{[download from cluster --- see figures/DOWNLOAD.md]}}
+\label{fig:step1}
+\end{figure}
+
+\section{Step 2 --- synthetic exact-label data (BUILT, probes TODO)}
+
+Generate synthetic clips with \textbf{exact} physical labels so we can probe which subspace encodes
+which quantity. Engines: \texttt{mujoco\_solid} (rigid: free\_fall / projectile / bounce, exact
+\texttt{qpos/qvel/qacc}, \texttt{opt.gravity}), \texttt{genesis\_fluid} (SPH/MPM, GPU-only, aggregate
+swarm state), plus 2D fallbacks. Generated on-cluster during extraction --- nothing to download.
+
+Probe reports per-layer linear+MLP $R^2$ for pos / vel / acc / radius / gravity / collision, with
+shuffled-latent + randomized-label controls (both must collapse to $\sim$0).
+
+\textbf{TODO}: run the quantity probes (\texttt{slurm\_train\_probe.sh} on the synthetic latents) and
+fill numbers here. Genesis API may need version tweaks (lines marked \texttt{\# GENESIS API}).
+
+\section{Step 3 --- category steering (DONE, clean negative)}
+
+Take real \emph{fluid} Physics-IQ clips $\rightarrow$ push latents along learned solid$-$fluid
+direction $\rightarrow$ decode $\rightarrow$ sweep $\alpha$. $\alpha$ is a \emph{fraction of per-token
+norm} (norms $\sim$150--240). Findings in discovery order:
+
+\begin{enumerate}
+\item \textbf{Probe-weight (max-margin) dir, deepest layer.} Readout moves monotonically ($\rho=1.0$)
+but \textbf{pixels don't change} until decode breaks into mush ($\sim$0.85$\cdot$norm). Discriminative
+vector is not decoder-renderable.
+\item \textbf{Diff-of-class-means dir, all layers.} Pixels move now --- but it's a \textbf{global
+blue/cool appearance shift + block artifacts}, dataset palette not object physics. Readout
+\emph{saturates} at smallest real $\alpha$ ($\geq 0.25 \rightarrow 1.0$): step function, not a
+controllability curve.
+\item \textbf{Fine low-$\alpha$ ($\leq 0.3$), 6 distinct fluids} (balloon, domino-in-juice,
+fill-glass, glass-stays-same, juice-in-water, liquid-on-duck). Every object/liquid \textbf{preserved};
+only a mild blue background tint. Nothing freezes, holds an edge, or solidifies.
+\end{enumerate}
+
+\textbf{Conclusion}: solid/fluid axis is decodable as a \emph{label} and renderable as
+\emph{appearance}, but steering \emph{repaints toward the target category's visual statistics, not a
+physics counterfactual on a fixed object}. Crude category direction conflates appearance with physics;
+the decoder paints appearance. Mechanistic negative --- localizes the gap.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\linewidth]{figures/steer_filmstrip.png}
+\caption{Steered decode of a real fluid clip (domino-in-juice) as $\alpha$ increases along the
+solid$-$fluid latent direction. The mug, table, and drink stay structurally fixed; the only systematic
+effect of $\alpha$ is a global cool/blue \emph{appearance} shift that degrades into block artifacts by
+$\alpha{=}1.5$. The intervention repaints the scene toward the target category's visual statistics
+rather than imposing a physics counterfactual on the object --- appearance, not dynamics. This is the
+documented Step-3 negative. \textbf{[download from cluster --- see figures/DOWNLOAD.md]}}
+\label{fig:filmstrip}
+\end{figure}
+
+\section{Next steps}
+
+\begin{itemize}
+\item \textbf{Temporal-preserving latent.} Clip-pooling collapses all $2048 = 8{\cdot}16{\cdot}16$
+tokens to one $1024$-vector --- throws away the temporal axis where dynamics live. Move to an
+$8\times1024$ temporal-preserving probe/direction.
+\item \textbf{Quantity directions from labelled synthetic (Step 2).} Direction tied to a measured
+quantity (velocity, gravity) far likelier to be a renderable physics axis than a category centroid.
+Use \texttt{steer\_decode.py} where ground truth exists.
+\item \textbf{(Optional) appearance-orthogonalized direction} --- only worth it once a quantity/temporal
+direction shows object-level effects; on current evidence orthogonalizing may remove the only
+component that renders.
+\item Don't invest more in category-centroid steering.
+\end{itemize}
+
+\bibliographystyle{iclr2026_conference}
+
+\end{document}

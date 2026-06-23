@@ -74,6 +74,12 @@ class DataConfig:
     scenarios: Any = field(default_factory=lambda: ["bouncing_ball", "projectile"])
     seed: int = 0
     ball_radius: float = 0.14  # mujoco_physics ball size
+    # moving_ball (Step 2 velocity-first) knobs
+    scenario: str = "constant_velocity"
+    speed_range: Any = field(default_factory=lambda: [0.010, 0.035])
+    radius_range: Any = field(default_factory=lambda: [0.07, 0.10])
+    fixed_speed: float = 0.022
+    camera_rotation: bool = False
 
 
 @dataclass

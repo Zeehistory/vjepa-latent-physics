@@ -1,0 +1,18 @@
+# Step 2 (velocity-first): clean single-ball CONSTANT-VELOCITY dataset with exact GT state.
+# White background, one ball, ball fully in frame the whole clip, fixed FPS. The only thing that
+# varies across clips is speed/direction/radius/start — so a learned "velocity subspace" can't be
+# confounded with object type, lighting, or scene appearance.
+# 32 frames, 128x128 per the controlled-experiment spec.
+name: moving_ball
+root: null
+image_size: 128
+num_frames: 32
+fps: 8
+scenario: constant_velocity
+categories: all
+split: train
+num_clips: 512
+# velocity is sampled over a broad range so the probe sees the full speed/direction manifold
+speed_range: [0.008, 0.038]     # per-frame normalized speed (at fixed FPS)
+radius_range: [0.07, 0.10]
+seed: 0

@@ -1,0 +1,16 @@
+# Step 2 (velocity-first): OCCLUSION variant. A static central vertical wall hides the ball for the
+# middle frames. The velocity label stays exact (constant) even on the hidden frames — this dataset
+# tests whether velocity is still decodable while the ball is invisible (object-permanence evidence
+# that the representation carries physical *state*, not just visible pixels).
+name: moving_ball
+root: null
+image_size: 128
+num_frames: 32
+fps: 8
+scenario: occlusion
+categories: all
+split: train
+num_clips: 512
+speed_range: [0.012, 0.030]     # bounded so the ball reliably crosses fully behind the wall
+radius_range: [0.07, 0.10]
+seed: 1

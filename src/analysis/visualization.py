@@ -130,6 +130,44 @@ def layerwise_probe_plot(records: list[dict], path: str | Path) -> Path:
     return path
 
 
+def velocity_probe_plot(
+    records: list[dict], path: str | Path, target: str = "vel"
+) -> Path:
+    """R² vs layer for one velocity target, one line per representation (clip_pool/temporal/...).
+
+    Shows the headline Step-2 comparison: does keeping the temporal (8x1024) sequence decode velocity
+    better than pooling to a single (1x1024) vector? Linear probe solid, MLP dashed; the shuffled-latent
+    control is drawn as a thin grey line near zero.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [r for r in records if r["target"] == target]
+    reps = sorted({r["representation"] for r in rows})
+    layers = sorted({r["layer"] for r in rows})
+    fig, ax = plt.subplots(figsize=(6.2, 4.0))
+    cmap = plt.get_cmap("tab10")
+    for ri, rep in enumerate(reps):
+        for kind, ls in (("linear", "-"), ("mlp", "--")):
+            ys = [next((r["r2"] for r in rows if r["layer"] == L and r["representation"] == rep
+                        and r["probe"] == kind), np.nan) for L in layers]
+            ax.plot(layers, ys, ls, color=cmap(ri), marker="o", ms=3,
+                    label=f"{rep} ({kind})")
+        # one shuffled-latent control line per representation (linear)
+        cs = [next((r["ctrl_shuffled_latent_r2"] for r in rows if r["layer"] == L
+                    and r["representation"] == rep and r["probe"] == "linear"), np.nan)
+              for L in layers]
+        ax.plot(layers, cs, ":", color="grey", lw=0.8)
+    ax.axhline(0.0, color="k", lw=0.5)
+    ax.set_xlabel("encoder layer"); ax.set_ylabel(f"R²  (target = {target})")
+    ax.set_title(f"Velocity decodability by layer — target={target}")
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    return path
+
+
 def confusion_matrix_plot(
     matrix: np.ndarray, labels: list[str], path: str | Path, title: str = "Confusion (out-of-fold)"
 ) -> Path:

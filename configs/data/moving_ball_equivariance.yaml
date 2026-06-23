@@ -1,0 +1,17 @@
+# Step 2 (velocity-first): EQUIVARIANCE variant. Same SPEED, swept DIRECTION (golden-ratio coverage of
+# the circle). If the model truly encodes a "velocity subspace", rotating the velocity direction should
+# rotate the latent representation within that subspace (equivariance up to a subspace rotation). Set
+# camera_rotation: true to additionally roll the camera and test equivariance under a viewpoint change.
+name: moving_ball
+root: null
+image_size: 128
+num_frames: 32
+fps: 8
+scenario: rotated
+categories: all
+split: train
+num_clips: 512
+fixed_speed: 0.022              # constant speed across all clips; only direction varies
+radius_range: [0.07, 0.10]
+camera_rotation: false          # set true for the camera-roll equivariance test
+seed: 2

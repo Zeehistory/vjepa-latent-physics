@@ -23,6 +23,8 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
+from .moving_ball import MovingBall
+from .moving_ball import state_dim as moving_ball_state_dim
 from .synthetic_physics import SyntheticPhysics, state_dim_for
 from .video_transforms import VideoTransform
 
@@ -105,6 +107,58 @@ class SyntheticPhysicsDataset(Dataset):
 @register_dataset("synthetic_physics")
 def _build_synthetic(cfg, encoder_image_size, encoder_frames) -> Dataset:
     return SyntheticPhysicsDataset(cfg, encoder_image_size, encoder_frames)
+
+
+class MovingBallDataset(Dataset):
+    """Wraps :class:`MovingBall` — the clean single-ball velocity dataset (Step 2, velocity-first).
+
+    State width is fixed (single object), so no cross-scenario padding is needed. The clip ``id`` and
+    ``category`` both carry the scenario so downstream grouping/relabel logic works unchanged.
+    """
+
+    def __init__(self, cfg: Any, encoder_image_size: int, encoder_frames: int | None) -> None:
+        self.gen = MovingBall(
+            image_size=cfg.image_size,
+            num_frames=cfg.num_frames,
+            fps=cfg.fps,
+            scenario=getattr(cfg, "scenario", "constant_velocity"),
+            speed_range=tuple(getattr(cfg, "speed_range", [0.010, 0.035])),
+            radius_range=tuple(getattr(cfg, "radius_range", [0.07, 0.10])),
+            fixed_speed=float(getattr(cfg, "fixed_speed", 0.022)),
+            camera_rotation=bool(getattr(cfg, "camera_rotation", False)),
+            seed=cfg.seed,
+        )
+        self.num_clips = cfg.num_clips
+        self.state_dim = moving_ball_state_dim()
+        self.transform = VideoTransform(
+            image_size=encoder_image_size, num_frames=encoder_frames, do_normalize=True,
+        )
+        self._cache: dict[int, Any] = {}
+
+    def __len__(self) -> int:
+        return self.num_clips
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        clip = self._cache.get(idx)
+        if clip is None:
+            clip = self.gen.generate(idx)
+            self._cache[idx] = clip
+        state, mask = _pad_state(clip.state, self.state_dim)
+        return {
+            "id": f"{clip.meta['scenario']}_{idx:05d}",
+            "frames": clip.frames,
+            "encoder_input": self.transform(clip.frames),
+            "state": state,
+            "state_mask": mask,
+            "state_keys": clip.state_keys,
+            "category": clip.meta["scenario"],
+            "meta": clip.meta,
+        }
+
+
+@register_dataset("moving_ball")
+def _build_moving_ball(cfg, encoder_image_size, encoder_frames) -> Dataset:
+    return MovingBallDataset(cfg, encoder_image_size, encoder_frames)
 
 
 def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:

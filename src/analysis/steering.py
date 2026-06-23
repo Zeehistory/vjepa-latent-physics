@@ -245,6 +245,53 @@ def category_readout(
     return predict
 
 
+def velocity_components(
+    latent_dir: str | Path, layer: int
+) -> tuple[np.ndarray, dict[str, np.ndarray], list[str]]:
+    """Clip-pooled latents ``(N, D)`` and the *signed* velocity targets per clip, for the moving-ball cache.
+
+    Returns ``(features, {"vel_x", "vel_y", "speed": (N,)}, ids)``. Unlike :func:`clip_features_and_scalar`
+    (which returns only the sign-free magnitude), this exposes the signed components so a *directional*
+    velocity axis (e.g. "more rightward motion") can be learned, not just "more speed".
+    """
+    ds = LatentDataset(latent_dir, layers=[layer])
+    feats, vx, vy, sp, ids = [], [], [], [], []
+    for i in range(len(ds)):
+        s = ds[i]
+        keys = s["state_keys"]
+        st = s["state"].numpy()
+        def col(name: str) -> float:
+            return float(st[:, keys.index(name)].mean())
+        feats.append(s["layers"][layer].numpy().mean(0))
+        vx.append(col("obj0_vel_x")); vy.append(col("obj0_vel_y")); sp.append(col("obj0_speed"))
+        ids.append(s["id"])
+    return (np.stack(feats, 0),
+            {"vel_x": np.asarray(vx, np.float32), "vel_y": np.asarray(vy, np.float32),
+             "speed": np.asarray(sp, np.float32)},
+            ids)
+
+
+def discover_velocity_direction(
+    latent_dir: str | Path, layer: int, target: str = "speed", method: str = "regression",
+) -> tuple[np.ndarray, Callable[[np.ndarray], np.ndarray], dict[str, Any]]:
+    """Learn a unit latent direction + independent readout for a signed velocity ``target``.
+
+    ``target`` is one of ``speed`` (sign-free magnitude), ``vel_x`` or ``vel_y`` (signed components).
+    Returns ``(direction (D,), readout_fn, info)``. The readout is fit on the same labelled cache and is
+    used as the *non-circular* latent-space check that the decoded edit moved velocity (the pixel-level
+    centroid tracker is the independent visual check).
+    """
+    feats, comps, ids = velocity_components(latent_dir, layer)
+    if target not in comps:
+        raise ValueError(f"target must be one of {list(comps)}, got '{target}'.")
+    y = comps[target]
+    direction = discover_direction(feats, y, method=method)
+    readout = fit_readout(feats, y)
+    info = {"target": target, "method": method, "n": len(y),
+            "y_min": float(y.min()), "y_max": float(y.max()), "raw_norm": 1.0}
+    return direction, readout, info
+
+
 def discover_quantity_direction(
     latent_dir: str | Path, layer: int, group: str, method: str = "regression"
 ) -> tuple[np.ndarray, Callable[[np.ndarray], np.ndarray]]:
