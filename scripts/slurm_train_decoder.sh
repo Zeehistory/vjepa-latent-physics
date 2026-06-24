@@ -26,6 +26,15 @@ cd "$SLURM_SUBMIT_DIR"
 
 mkdir -p logs
 
+# If a checkpoint already exists (e.g. requeued after a scavenge preemption), resume from the newest
+# one so we never lose training progress. step_*.pt are written every ckpt_every; last.pt at the end.
+RESUME=""
+CKDIR="$OUTPUT_DIR/checkpoints"
+if [ -d "$CKDIR" ]; then
+    LATEST=$(ls -1t "$CKDIR"/last.pt "$CKDIR"/step_*.pt 2>/dev/null | head -1)
+    if [ -n "$LATEST" ]; then RESUME="train.resume=$LATEST"; echo "[train] resuming from $LATEST"; fi
+fi
+
 # accelerate launch uses torchrun under the hood; one process per GPU
 accelerate launch \
     --num_processes $SLURM_GPUS_ON_NODE \
@@ -33,4 +42,5 @@ accelerate launch \
     scripts/train_decoder.py \
     --config "$CONFIG" \
     --latent_dir "$LATENT_DIR" \
-    --output_dir "$OUTPUT_DIR"
+    --output_dir "$OUTPUT_DIR" \
+    $RESUME
