@@ -210,12 +210,21 @@ class LatentDataset(Dataset):
     def _load_shard(self, shard: str) -> dict[str, Any]:
         if shard in self._shard_cache:
             return self._shard_cache[shard]
+        # When only a subset of layers is requested, drop the others before caching so the in-RAM
+        # shard cache holds e.g. 4/24 layers instead of the full payload. Without this, a consumer
+        # that streams every sample (decoder DataLoader, steering) accumulates all shards' full
+        # multi-layer tensors and OOMs (each shard is ~30GB on disk).
+        want = None
+        if self.layers != "all" and self.layers is not None:
+            want = {int(x) for x in self.layers}
         samples: dict[str, Any] = {}
         with tarfile.open(self.root / shard, "r") as tar:
             for member in tar.getmembers():
                 f = tar.extractfile(member)
                 assert f is not None
                 payload = torch.load(io.BytesIO(f.read()), map_location="cpu", weights_only=False)
+                if want is not None:
+                    payload["layers"] = {li: t for li, t in payload["layers"].items() if li in want}
                 samples[payload["id"]] = payload
         self._shard_cache[shard] = samples
         return samples
