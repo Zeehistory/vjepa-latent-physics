@@ -333,6 +333,20 @@ show the principle transfers/generalizes rather than overfitting one model.
 
 ## Changelog
 
+- **2026-06-28 (pm)** — Step 2 VELOCITY↔NUISANCE DISENTANGLEMENT → POSITIVE. Encoded the colour +
+  background nuisance train caches (size already cached), computed top-8 PCA subspaces of the same-scene
+  ΔH for each factor (velocity from the v2d global basis), and measured mean principal angles between the
+  velocity subspace and each appearance-nuisance subspace (`scripts/disentangle_nuisance.py`,
+  `velocity_ops.principal_angles_bases`; calibration: two random 8D subspaces in this ~2M-dim space sit at
+  89.9° = "share nothing"). Velocity is **largely orthogonal to size/colour/background** and increasingly so
+  with depth: vel-size/vel-color/vel-bg = 75.7/84.7/73.3° (L6) → 80.2/81.5/81.6° (L12) → 84.0/85.9/85.2°
+  (L23), vs the 89.9° random reference. The appearance factors overlap MORE with each other than with
+  velocity (size-color dips to ~60° at L12/L18 — both are ball-token appearance edits). So the velocity axis
+  is genuinely distinct from appearance (steering velocity should leave size/colour/bg ~untouched), with a
+  small residual overlap that shrinks in deep layers (deepest L23 cleanest). Honest caveat: 73-86°, not a
+  perfect 90° — velocity shares a little with appearance (both touch the ball's tokens). Artifacts:
+  `outputs/analysis/moving_ball_v2d/disentangle/disentangle_summary.json` + per-factor bases.
+
 - **2026-06-28 (pm)** — Step 2 DIRECTION-AWARE OPERATOR (the open lever) → clean NEGATIVE. canon_ridge
   (start-roll) gave no lift because within a scene the start is already shared and the ΔH spread is
   DIRECTION-induced. Best equivariance-free fix tried: a DIRECTION-CONDITIONED canonicalized ridge — bin
