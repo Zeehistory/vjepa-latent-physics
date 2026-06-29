@@ -9,8 +9,14 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{amsmath}
+\usepackage{xcolor}
 
-\title{Working Notes: Decoding \& Steering Physics in Frozen V-JEPA2 Latents}
+% --- convenience macros ---
+\newcommand{\vjepa}{V-JEPA2}
+\newcommand{\todo}[1]{\textcolor{red}{[\textbf{TODO:} #1]}}
+\newcommand{\alphanorm}{\ensuremath{\alpha}}        % steering coefficient (fraction of token norm)
+
+\title{Working Notes: Decoding \& Steering Physics\\ in Frozen V-JEPA2 Latents}
 \author{Anonymous}
 
 %\iclrfinalcopy
@@ -18,48 +24,92 @@
 
 \maketitle
 
-\begin{center}
-\emph{Raw progress notes, not a paper draft. Numbers from cluster runs 2026-06-22 (V-JEPA2-large,
-Physics-IQ). TODO markers flag gaps.}
-\end{center}
 
-\section{What this project is}
+%==============================================================================
+\section{Overview: what we are asking, and why it is subtle}
+%==============================================================================
 
-Question: do \textbf{frozen} V-JEPA2 video latents encode interpretable physics (position, velocity,
-accel, direction, gravity, collisions, object permanence), is it \emph{linearly} accessible, and can
-we \emph{steer} it?
+\paragraph{The question.}
+A frozen, pretrained video model (\vjepa{}) turns a clip into a stack of feature latent vectors.The question is whether those latents encode \emph{physics} --- where an object is, how fast it moves, which way it is heading,
+gravity, collisions, whether an object that goes out of sight still ``exists'' --- and, if so, whether
+that physics is (i) easy to read out and (ii) something we can actively \emph{change}.
 
-Discipline we keep separate (don't conflate): decoder reconstructs pixels $\neq$ latent contains
-physics $\neq$ linearly accessible $\neq$ model uses physical laws $\neq$ model is steerable. Every
-result carries controls: shuffled-latent, randomized-label, oracle-state, copy/mean/random-frame.
-
-\section{Pipeline (what's built \& runs)}
+%==============================================================================
+\section{Pipeline (what is built and runs)}
+\label{sec:pipeline}
+%==============================================================================
 
 \begin{itemize}
-\item \textbf{Encode}: frozen V-JEPA2-large (\texttt{facebook/vjepa2-vitl-fpc64-256}, ViT-L, 24
-layers), never fine-tuned.
-\item \textbf{Cache}: multi-layer token latents to disk (WebDataset shards + Parquet meta + sha256);
-probes/decoder never rerun the encoder.
-\item \textbf{Decode}: transformer video decoder, learned query tokens cross-attend frozen latents.
-Modes: latent$\rightarrow$frame, context$\rightarrow$future, latent$\rightarrow$state.
-\item \textbf{Probe}: linear + MLP per layer.
-\item \textbf{Steer}: add a learned direction to latents, re-decode, sweep $\alpha$.
-\item \textbf{Data}: Physics-IQ (real clips, no per-frame labels) + deterministic synthetic sim
-(exact per-frame ground-truth state). Step-2 synthetic = MuJoCo (rigid) + Genesis (fluid), generated
-on-cluster during extraction.
-\item Whole thing also runs offline on CPU with a deterministic mock encoder; real weights are a
-config swap. Runs record git state + hardware + checksums.
+\item \textbf{Encode.} Run a frozen \vjepa{}-large encoder (ViT-L, 24 layers, hidden size 1024) over each clip.
+\item \textbf{Cache.} Write the multi-layer token latents to disk.  Every downstream job reads the cache, not the encoder. Cached layers
+are $\{6,12,18,23\}$ out of 24; each clip yields an $8\times16\times16$ token grid (2048 tokens) per
+layer.
+\item \textbf{Decode.} A transformer video decoder with learned query tokens that cross-attend into
+the frozen latent ``memory.'' It supports three modes: latent$\rightarrow$frame (reconstruct),
+context$\rightarrow$future (predict), and latent$\rightarrow$state (regress physical variables).
+\item \textbf{Probe.} Linear and MLP probes per layer, used to test \emph{what} is decodable and
+\emph{how easily}.
+\item \textbf{Steer.} Add a learned direction to the latents, re-decode, and sweep the step size
+\alphanorm{} to see whether and how the output changes.
+\item \textbf{Data.} Two sources. (a) Physics-IQ: real video clips, but with \emph{no} per-frame
+numeric physics labels, so we can do reconstruction and category analysis but not exact state
+regression. (b) A deterministic synthetic simulator with exact per-frame ground-truth state (position,
+velocity, acceleration, gravity, collisions, visibility). The originally planned synthetic step was
+rich 3D scenes (MuJoCo rigid bodies, Genesis fluids); Section~\ref{sec:next} argues for starting much
+simpler than that.
 \end{itemize}
 
-\section{Step 1 --- category probe (DONE, positive)}
+%==============================================================================
+\section{Step 0: does the decoder work at all? (\textcolor{blue}{RESULT: YES)}}
+\label{sec:step0}
+%==============================================================================
 
-Linear probe on clip-pooled V-JEPA2-large latents. 3 categories kept (\texttt{fluid\_dynamics},
-\texttt{optics}, \texttt{solid\_mechanics}); thermo + magnetism dropped (too few scenarios for valid
-grouped CV). Scenario-grouped CV. Majority rate $= 0.592$.
+Before asking whether latents encode physics, we check the precondition: can anything be reconstructed
+from the frozen latents? A 410M-parameter transformer decoder (24 layers, width 1024, 16 heads) was
+trained for 20{,}000 steps on cached \vjepa{} Physics-IQ latents; training loss fell from 0.44 to
+0.015.
 
 \begin{table}[h]
-\caption{Step-1 category probe. Raw $\approx$ z-scored ($\sim$1 pt) $\Rightarrow$ z-scoring is not
-manufacturing the separability. Controls collapse far below majority $\Rightarrow$ no scenario leakage.}
+\caption{Reconstruction on Physics-IQ. The decoder beats the trivial ``copy the first frame'' baseline
+by roughly $+12$\,dB PSNR, so it is genuinely reconstructing the \emph{evolving} clip, not just copying
+static appearance. Caveat: these numbers are on the \emph{training} split, so treat them as optimistic;
+a held-out evaluation is still owed (\todo{run held-out Physics-IQ test split}). FVD is not yet
+implemented.}
+\label{tab:recon}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Method} & \textbf{PSNR (dB)} & \textbf{SSIM} \\
+\midrule
+Copy-first-frame baseline      & 27.3  & 0.915 \\
+Trained \vjepa{} latent decoder & \textbf{39.7} & \textbf{0.981} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+Auxiliary reconstruction metrics for the trained decoder: MS-SSIM $0.990$, LPIPS $0.024$, $L_1
+\approx 0.005$. \textbf{Takeaway:} test~1 holds --- the frozen latents carry enough information to
+rebuild the video. This makes it meaningful to ask the harder questions about \emph{physical}
+information next.
+
+%==============================================================================
+\section{Step 1: category probe (\textcolor{blue}{RESULT: YES)}}
+\label{sec:step1}
+%==============================================================================
+
+We ask whether the latent ``knows'' a coarse kind of physics: which physical \emph{regime} a clip
+belongs to (solid mechanics vs.\ fluid dynamics vs.\ optics). We train a linear probe on
+\emph{clip-pooled} \vjepa{}-large latents (the 2048 tokens for a clip are averaged into a single
+$1024$-dim vector). Thermodynamics and magnetism are dropped because they have too few distinct
+scenarios for a fair grouped split. Validation uses \textbf{scenario-grouped} cross-validation, so no
+scenario appears in both train and test --- this is the right anti-leakage split for Physics-IQ.
+Majority-class accuracy is $0.592$.
+
+\begin{table}[h]
+\caption{Step-1 category probe (3 classes). The raw-space probe nearly matches the z-scored one
+($\sim$1 point apart), so standardization is \emph{not} manufacturing the separability. The
+shuffled-label control collapses far below the majority rate, so the signal is not scenario leakage.}
 \label{tab:step1}
 \begin{center}
 \begin{tabular}{lcccc}
@@ -73,91 +123,346 @@ raw (no z-score)       & 0.898 & 0.887 & 23 & 0.462 \\
 \end{center}
 \end{table}
 
-Takeaways:
-\begin{itemize}
-\item Category structure is genuinely linear in the native latent space (answers supervisor's z-score
-worry directly). Use \textbf{raw} directions for steering (no $\sigma$ inverse-map needed).
-\item Peak layer differs by run (std=18, raw=23) --- pick steering layer from the full curve, not the
-argmax.
-\end{itemize}
+\paragraph{Is it just the picture being blue/bright?}
+A natural worry: maybe the probe is exploiting global color (fluid clips look blue, etc.) rather than
+physics. A pixel baseline using only the clip's mean RGB scores $0.490$ accuracy --- \emph{below} the
+$0.592$ majority rate. So global brightness/color does not explain the latent result. (This rules out
+the crudest appearance confound, not all of them; object identity and background are still entangled
+with category, which becomes the crux in Step~3.)
 
-\paragraph{Geometry (deepest layer).} Per-class raw-space direction cosines:
-fluid$\leftrightarrow$solid $=-0.702$ (most anti-aligned), optics$\leftrightarrow$solid $=-0.482$,
-fluid$\leftrightarrow$optics $=-0.287$. So fluid$\rightarrow$solid is the cleanest contrast to steer.
-But classifier-free separation is \emph{low}: Fisher ratio $\approx 0.11$, silhouette $\approx 0.09$
---- thin discriminative direction, not separated blobs. Foreshadows that steering is fragile.
+\paragraph{Reading the result.}
+Category structure is genuinely linear in the native latent space, and linear probes beat MLP probes at
+every cached depth, which says the structure is simple, not something the probe has to bend itself into.
+Accuracy climbs with depth, peaks in the upper-middle layers, and dips slightly at the very last layer;
+because the peak layer differs by run (18 standardized, 23 raw), we should pick a steering layer from
+the \emph{whole} depth curve rather than from a single argmax.
 
-\begin{figure}[h]
+\paragraph{Geometry: decodable, but not tidy.}
+The per-class mean directions (in raw latent space) are most anti-aligned for
+fluid$\leftrightarrow$solid (cosine $-0.702$), then optics$\leftrightarrow$solid ($-0.482$), then
+fluid$\leftrightarrow$optics ($-0.287$). So the fluid$\rightarrow$solid contrast is the cleanest axis to
+attempt steering on. \emph{However}, the classes are not compact, well-separated blobs: the Fisher
+ratio is $\approx 0.11$ and the silhouette score is $\approx 0.09$. In words, there exists a thin
+discriminative \emph{direction} that classifies well even though the class point-clouds heavily overlap.
+This is a foreshadowing: a direction good for \emph{classification} need not be a direction good for
+\emph{steering}.
+
+\begin{figure}[h!]
 \centering
 \includegraphics[width=0.65\linewidth]{figures/category_accuracy_by_layer.png}
-\caption{Layerwise category-probe accuracy (linear vs.\ MLP, with shuffled-label and pixel/appearance
-baselines). Linear $\geq$ MLP at every depth, both climb with depth and sit far above the 0.592
-majority and the controls. \textbf{[download from cluster --- see figures/DOWNLOAD.md]}}
+\caption{Layerwise category-probe accuracy (linear vs.\ MLP), with shuffled-label and
+pixel/appearance baselines. Linear $\geq$ MLP at every depth; both climb with depth and sit far above
+the $0.592$ majority and all controls.}
 \label{fig:step1}
 \end{figure}
 
-\section{Step 2 --- synthetic exact-label data (BUILT, probes TODO)}
+\section{Step 2: velocity-first, confound-controlled steering
+    (\textcolor{blue}{RESULT: probe YES, occlusion YES, steering YES})}
+  \label{sec:step2}
+  %==============================================================================
+  Velocity is the simplest dynamical quantity --- continuous, and in a simulator known exactly per
+  frame --- so it is the cleanest possible target for the rung-5 test Step~3 failed. This phase builds
+  the
+  stripped dataset Step~3's negative argued for, and runs the probe$\rightarrow$steer chain on it. It is
+  where the headline of these notes now sits: the decisive ``steer the latent and watch the pixels
+  change at the right magnitude'' test, which Step~3 failed, \emph{passes} here.
 
-Generate synthetic clips with \textbf{exact} physical labels so we can probe which subspace encodes
-which quantity. Engines: \texttt{mujoco\_solid} (rigid: free\_fall / projectile / bounce, exact
-\texttt{qpos/qvel/qacc}, \texttt{opt.gravity}), \texttt{genesis\_fluid} (SPH/MPM, GPU-only, aggregate
-swarm state), plus 2D fallbacks. Generated on-cluster during extraction --- nothing to download.
+  \paragraph{The bar we are setting.}
+  Sonia's work shows ``velocity'' is decodable from \emph{some} subspace of the latents. We regard that
+  as
+  necessary but \textbf{not sufficient}. A probe that decodes velocity does not establish (a) that the
+  probe direction is the subspace velocity actually \emph{lives} in, nor (b) that intervening on it
+  changes the decoded velocity. The decisive test is the one Step~3 makes us respect: \emph{find the
+  velocity direction, steer along it, decode, and confirm the ball's velocity actually changes} --- by
+  re-probing the re-encoded decode \emph{and} by eye. Anything short of that is a classification result
+  wearing a steering costume.
 
-Probe reports per-layer linear+MLP $R^2$ for pos / vel / acc / radius / gravity / collision, with
-shuffled-latent + randomized-label controls (both must collapse to $\sim$0).
+  \subsection{Design (each principle answers a Step-3 failure)}
+  A 2D single ball on a clean white background --- no texture, palette, object-identity, or background,
+  the
+  exact confounds that let Step~3 ``succeed'' by repainting. Fixed FPS, so velocity is well-defined in
+  pixels/frame; the ball stays fully in frame every frame, so velocity is never confounded with
+  entry/exit. Per-frame metadata stores exact center $(x,y)$ and velocity $(v_x,v_y)$. Crucially, we keep
+  time: the $2048\times1024$ latent is pooled spatially \emph{within each temporal slot} to an
+  $8\times1024$ form and read with a \textbf{temporal} linear probe, rather than clip-mean-pooled to
+  $1\times1024$ (the Step-1 limitation that discarded the time axis dynamics live in). Three variants:
+  constant-velocity, occlusion (a static wall the ball passes behind), and rotated-but-same-speed.
+  Spec: $32$ frames, $128\times128$, fixed FPS, white background. Demo clips were eyeballed first,
+  dataset
+  extracted second.
 
-\textbf{TODO}: run the quantity probes (\texttt{slurm\_train\_probe.sh} on the synthetic latents) and
-fill numbers here. Genesis API may need version tweaks (lines marked \texttt{\# GENESIS API}).
+  \subsection{Probing results}
 
-\section{Step 3 --- category steering (DONE, clean negative)}
+  \paragraph{Velocity probe (\textcolor{blue}{YES, strong}).}
+  Velocity is almost perfectly linearly decodable. The temporal probe reaches $R^2\approx0.998$ across
+  layers; even clip-pooled it is $R^2\approx0.996$, so the code survives pooling though the temporal form
+  is consistently a touch better. Shuffled-label and random controls collapse to \emph{negative} $R^2$,
+  so
+  this is not leakage. This is the exact-regression version of the rung-2/3 test Step~1 could only run as
+  a
+  coarse category.
 
-Take real \emph{fluid} Physics-IQ clips $\rightarrow$ push latents along learned solid$-$fluid
-direction $\rightarrow$ decode $\rightarrow$ sweep $\alpha$. $\alpha$ is a \emph{fraction of per-token
-norm} (norms $\sim$150--240). Findings in discovery order:
+  \begin{table}[h]
+  \caption{Velocity decodability from frozen \vjepa{} latents (best layer). The temporal $8\times1024$
+  form
+  edges out clip-pooling; both crush the controls.}
+  \label{tab:vel_probe}
+  \begin{center}
+  \begin{tabular}{lc}
+  \toprule
+  \textbf{Representation} & \textbf{velocity $R^2$} \\
+  \midrule
+  Temporal linear ($8\times1024$) & \textbf{0.998} \\
+  Clip-pooled linear ($1\times1024$) & 0.996 \\
+  Shuffled-label control & $<0$ (collapse) \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{table}
+
+  \paragraph{Occlusion / object permanence (\textcolor{blue}{YES --- the headline probe}).}
+  Train the probe on visible frames only, evaluate on the frames where the ball is \emph{fully hidden}
+  behind the wall. Velocity stays decodable while the ball is invisible: $R^2\approx0.9975$ on hidden
+  frames vs.\ $0.9986$ on visible --- essentially no drop. The latent maintains the physical state of an
+  object it cannot see. This is the rung-4 result we flagged as the strongest available evidence that the
+  representation is \emph{physical} rather than pixel-bound, and it held up cleanly.
+
+  \paragraph{Equivariance (\textcolor{blue}{promising, not proven}).}
+  Holding speed fixed and rotating the motion direction, the velocity subspace transforms approximately
+  equivariantly: circularity $\approx0.95$, direction-$R^2\approx0.985$. Encouraging evidence that the
+  subspace encodes velocity as a rotatable physical quantity rather than a dataset artifact, but the
+  margins are not yet tight enough to call settled. Camera-viewpoint equivariance still needs a 3D
+  renderer (\todo{choose 3D renderer for the viewpoint variant}).
+
+  \subsection{Steering, take 1: the probe direction does not render}
+  First attempt --- discover the velocity direction with the probe, push the latent along it, decode,
+  and re-track the ball. The probe \emph{readout} is perfectly steerable: pushing along the velocity
+  direction moves decoded-readout speed, $v_x$, and $v_y$ monotonically ($\rho=1.000$ each). But decode
+  the steered latent and re-track the ball in pixels, and measured speed is essentially flat
+  ($\sim\!0.009$ for every \alphanorm) against a ground-truth range of $0.008$--$0.038$. \textbf{Readout
+  moves, pixels don't} --- the identical failure mode as Step-3 category steering. We root-caused and
+  fixed three stacked decoder pathologies (sigmoid saturation on pure-white targets; foreground-gradient
+  dilution; latent-blindness, where the decoder rendered a dataset-average ball), but even with the ball
+  rendering, the decode would not track the steered \emph{magnitude}. The diagnosis: the probe direction
+  is an \emph{abstract} axis fit to predict a number; pushing the latent along it goes \emph{off the
+  manifold}, and the decoder will not faithfully render an off-manifold perturbation. This isolates the
+  failure to the decoder/edit, not to the subspace --- which the probes show is genuinely there.
+
+  \subsection{Steering, take 2: on-manifold difference vectors
+      (\textcolor{blue}{YES --- the magnitude gap closes})}
+  The fix has two halves, both motivated by ``stay on the manifold the decoder was trained on.''
+
+  \emph{(i) The edit.} Following an LLM activation-steering analogy, derive the steering vector from
+  \textbf{two real encoded clips of the same scene} that differ only in speed --- bit-identical first
+  frame and direction. Let $H_a=E(\text{slow})$, $H_b=E(\text{fast})$, and $\Delta=H_b-H_a$. Decode
+  $H_a+\alphanorm\!\cdot\!\Delta$: at $\alphanorm{=}0$ we are at the slow clip, at $\alphanorm{=}1$ the
+  fast clip, and $\alphanorm\in[0,1]$ \emph{interpolates two reconstructable latents}, so the endpoints
+  are guaranteed faithful and the path stays near the manifold.
+
+  \emph{(ii) The decoder objective.} The remaining magnitude gap (the decoded ball $\sim$4$\times$ too
+  slow even when reconstructing $H_b$) was the decoder's \emph{loss}, not its capacity: a pixel loss is
+  minimized by painting a static, path-covering \emph{smear} whose centroid barely moves. We added a
+  per-frame \textbf{frame-position loss} that ties the decoded ball's differentiable soft centroid to
+  the ground-truth center every frame (a smear is then heavily penalized), plus a light anti-smear
+  spread term.
+
+  With both in place, the decisive test passes. On 20 held-out test scenes, decode the steered latent
+  and re-track the ball in pixels:
+
+  \begin{table}[h]
+  \caption{On-manifold difference-vector velocity steering (per-pair $\Delta$, 20 held-out scenes).
+  Decoded ball speed now \emph{tracks} the steering knob at the right magnitude across the on-manifold
+  range $\alphanorm\in[0,1]$: monotonicity $\rho=0.90$, decoded-vs-ground-truth linearity $r=0.952$
+  (before the frame-position loss: $\rho=0.80$, $r=0.34$, with the decoded range $\sim$4$\times$
+  compressed). Endpoints reconstruct $v_a$/$v_b$ to $\sim$3.6\%/1.9\%; $0/100$ untrackable decodes.}
+  \label{tab:diffsteer}
+  \begin{center}
+  \begin{tabular}{lccccc}
+  \toprule
+  \alphanorm{} & $-0.5$ & $0.0$ ($=H_a$) & $0.5$ & $1.0$ ($=H_b$) & $1.5$ \\
+  \midrule
+  decoded speed   & 0.0207 & 0.0199 & 0.0300 & 0.0395 & 0.0431 \\
+  GT-interp speed & 0.0095 & 0.0197 & 0.0299 & 0.0401 & 0.0503 \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{table}
+
+  \textbf{This is the result Step~3 demanded and could not deliver}: steer the latent, decode, re-track
+  in pixels, and the ball moves at the commanded speed --- visible by eye in the filmstrips, not just in
+  a readout. \emph{Honest caveats.} Extrapolation outside $[0,1]$ \emph{saturates} (the decoded ball
+  stops short of the ground-truth extrapolated speed --- expected, since it is off the trained velocity
+  range). And a single \emph{global} averaged ``speed-up vector'' does \textbf{not} transfer ($\rho=0.30$
+  on held-out scenes): the per-token $\Delta$ is localized to each scene's ball path, so averaging across
+  scenes with different positions/directions blurs it. The per-pair, same-scene $\Delta$ is essential ---
+  which raises the next question.
+
+  \subsection{Toward a transferable velocity representation (2D velocity)}
+  Per-pair $\Delta$ proves the counterfactual but needs a \emph{matched fast clip} for every edit. Is
+  there instead a single, transferable velocity representation we can steer with, given only a desired
+  velocity? To ask this properly we move from speed-only to true \textbf{2D velocity}
+  (direction\,+\,magnitude): scenes of 8 clips share one start position, each clip a distinct velocity
+  \emph{vector}. The headline metric becomes the angle error between the decoded and target velocity
+  vectors (the ``stay-at-$v_a$'' no-op floor is $\approx44^\circ$, since the eight velocities differ by
+  $\sim45^\circ$ in heading).
+
+  \begin{table}[h]
+  \caption{Steering 2D velocity on held-out test scenes (decoded-vs-target velocity-vector angle error,
+  lower is better; no-op floor $\approx44^\circ$). The per-pair counterfactual is near-exact; a learned
+  \emph{global} representation transfers but only partially, and the canonicalization/operator levers do
+  not lift it.}
+  \label{tab:vel2d}
+  \begin{center}
+  \begin{tabular}{lcc}
+  \toprule
+  \textbf{Method} & \textbf{angle err} & \textbf{note} \\
+  \midrule
+  full $\Delta$ (per-pair, on-manifold) & \textbf{1.66$^\circ$} & speed-ratio $0.997$; $\rho_{v_x},\rho_{v_y}=0.999$ \\
+  global subspace $U$ ($k{=}8$)          & $21^\circ$ & real but partial; $U_2{=}27^\circ$ \\
+  learned linear operator $F_U$ (ridge)  & $34.4^\circ$ & transfers partially (latent cos $0.39$) \\
+  + GT-informed canonicalization         & $34.8^\circ$ & \emph{no lift} (clean negative) \\
+  + direction-binned operator            & $40.3^\circ$ & \emph{worse} with more bins (clean negative) \\
+  random same-rank subspace              & $44^\circ$ & no-op floor \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{table}
+
+  Reading the table top to bottom. The per-pair full-$\Delta$ edit extends cleanly from speed to
+  direction\,+\,magnitude (angle error $1.66^\circ$, speed ratio $0.997$): \textbf{faithful 2D velocity
+  steering works} when we have the matched clip. A \emph{global, low-rank} velocity subspace $U$ is
+  \textbf{real but partial}: $k{=}8$ components reach $21^\circ$ (vs.\ $44^\circ$ random) and saturate
+  there. It cannot reach the per-pair $1.7^\circ$ because the velocity edit is not globally low-rank ---
+  \emph{within} a scene the velocity $\Delta H$ has effective rank $\approx5.5$ (varying the
+  \emph{direction} moves the ball through different tokens), and \emph{across} scenes the per-scene 2D
+  velocity subspaces are near-orthogonal (mean principal angle $\sim71^\circ$). So $U$ captures the
+  \emph{scene-shared} component of the edit ($\sim$37\%); the majority is scene-local \emph{placement}.
+  A learned linear operator $F_U$ that maps a desired $\Delta v$ straight to a latent edit transfers to
+  held-out scenes but only partially ($34.4^\circ$), exactly matching that 37\% ceiling. Two attempts to
+  push past it are clean negatives: GT-informed start-roll \emph{canonicalization} gives no lift
+  ($34.8^\circ$, because within a scene the start is already shared and the spread is direction-induced),
+  and a \emph{direction-conditioned} binned operator makes generalization monotonically \emph{worse}
+  ($40.3^\circ\rightarrow42.7^\circ$ as bins increase) --- splitting by heading discards the shared
+  component without recovering the direction-specific one. \textbf{Takeaway:} the velocity counterfactual
+  cannot be synthesized from the velocity \emph{command} alone by a (binned) linear operator; it is about
+  token/path \emph{position}, so the per-pair edit (optionally denoised through the global $\sim$8D
+  subspace) remains the faithful route. The open lever is a trajectory/position-conditioned operator,
+  not more bins or scale.
+
+  \subsection{Velocity is disentangled from appearance
+      (\textcolor{blue}{YES})}
+  A final worry: even a clean velocity edit is only safe if the velocity axis is \emph{distinct} from
+  appearance --- otherwise ``steer faster'' might quietly recolor or resize the ball (the Step-3 disease).
+  We test it directly. Build size, color, and background nuisance datasets; for each factor compute the
+  top-8 PCA subspace of the same-scene $\Delta H$; then measure principal angles between the velocity
+  subspace and each appearance-nuisance subspace. Calibration: two random 8D subspaces in this
+  $\sim$2M-dimensional space sit at $89.9^\circ$ (``share nothing'').
+
+  \begin{table}[h]
+  \caption{Mean principal angle (degrees) between the velocity subspace and each appearance-nuisance
+  subspace, by layer. Higher = more orthogonal; the random reference is $89.9^\circ$. Velocity is
+  largely orthogonal to size/color/background and \emph{increasingly} so with depth.}
+  \label{tab:disentangle}
+  \begin{center}
+  \begin{tabular}{lccc}
+  \toprule
+  \textbf{Layer} & \textbf{vel--size} & \textbf{vel--color} & \textbf{vel--background} \\
+  \midrule
+  L6  & 75.7 & 84.7 & 73.3 \\
+  L12 & 80.2 & 81.5 & 81.6 \\
+  L23 & 84.0 & 85.9 & 85.2 \\
+  \bottomrule
+  \end{tabular}
+  \end{center}
+  \end{table}
+
+  Velocity sits at $73$--$86^\circ$ from every appearance factor and climbs toward the $89.9^\circ$
+  random reference in the deeper layers (L23 cleanest). Tellingly, the appearance factors overlap
+  \emph{more with each other} than any does with velocity (size--color dips to $\sim60^\circ$ --- both
+  are ball-token appearance edits). So the velocity axis is genuinely a distinct subspace: steering it
+  should leave size/color/background largely untouched, with a small residual overlap that shrinks with
+  depth. \emph{Honest caveat:} $73$--$86^\circ$ is not a perfect $90^\circ$ --- velocity shares a little
+  with appearance, unsurprisingly, since both touch the ball's tokens.
+
+  \paragraph{Where this leaves us.}
+  Probe, occlusion, and equivariance establish that velocity actually \emph{lives in} --- and
+  \emph{persists in} --- this subspace. The on-manifold difference-vector edit, paired with a
+  frame-position decoder loss, then clears the bar Step~3 set: \textbf{steer the latent, decode, and the
+  ball's pixel-measured velocity changes at the right magnitude} ($\rho=0.90$, $r=0.952$), in 2D
+  ($1.7^\circ$ angle error), along an axis that is disentangled from appearance. The remaining honest
+  gaps are about \emph{generality}, not existence: a faithful edit currently needs a matched same-scene
+  clip (a global linear operator transfers only $\sim$37\% of it), and extrapolation beyond the trained
+  velocity range saturates. The next lever is a trajectory/position-conditioned operator that could
+  synthesize the scene-local part of the edit from geometry alone.
+%==============================================================================
+\section{Step 3: category steering (\textcolor{blue}{RESULT: NOT YET)}}
+\label{sec:step3}
+%==============================================================================
+
+Here we attempt the top rung: take \emph{real fluid} Physics-IQ clips, push
+their latents along the learned solid$-$fluid direction, decode, and sweep the step size \alphanorm{}
+(measured as a fraction of a token's norm; token norms are $\sim$150--240). If the latents encoded a
+manipulable notion of ``solid vs.\ fluid,'' we would expect the decoded liquid to start behaving like a
+solid. It does not. The investigation went through three stages:
 
 \begin{enumerate}
-\item \textbf{Probe-weight (max-margin) dir, deepest layer.} Readout moves monotonically ($\rho=1.0$)
-but \textbf{pixels don't change} until decode breaks into mush ($\sim$0.85$\cdot$norm). Discriminative
-vector is not decoder-renderable.
-\item \textbf{Diff-of-class-means dir, all layers.} Pixels move now --- but it's a \textbf{global
-blue/cool appearance shift + block artifacts}, dataset palette not object physics. Readout
-\emph{saturates} at smallest real $\alpha$ ($\geq 0.25 \rightarrow 1.0$): step function, not a
-controllability curve.
-\item \textbf{Fine low-$\alpha$ ($\leq 0.3$), 6 distinct fluids} (balloon, domino-in-juice,
-fill-glass, glass-stays-same, juice-in-water, liquid-on-duck). Every object/liquid \textbf{preserved};
-only a mild blue background tint. Nothing freezes, holds an edge, or solidifies.
+\item \textbf{Probe-weight (max-margin) direction, deepest layer.} The probe \emph{readout} moves
+perfectly monotonically with \alphanorm{} ($\rho=1.0$), but the \emph{pixels do not change} until the
+decode simply collapses into mush at large \alphanorm{} ($\sim 0.85\times$norm). The discriminative
+vector is real for classification but is not something the decoder can render --- exactly the
+foreshadowing from Step~1's geometry.
+\item \textbf{Difference-of-class-means direction, all layers.} Now the pixels \emph{do} move --- but
+the effect is a global blue/cool \emph{appearance} shift plus block artifacts: the dataset's fluid
+\emph{palette}, not its physics. And the probe readout \emph{saturates} at the smallest real
+\alphanorm{} ($\geq 0.25$ already maxes out): a step function, not a controllability curve.
+\item \textbf{Fine, low-\alphanorm{} sweep ($\leq 0.3$) across 6 distinct fluids} (balloon,
+domino-in-juice, fill-glass, glass-stays-same, juice-in-water, liquid-on-duck). Every object and liquid
+is \emph{preserved}; the only systematic effect is a mild blue background tint. Nothing freezes, holds
+an edge, or solidifies.
 \end{enumerate}
 
-\textbf{Conclusion}: solid/fluid axis is decodable as a \emph{label} and renderable as
-\emph{appearance}, but steering \emph{repaints toward the target category's visual statistics, not a
-physics counterfactual on a fixed object}. Crude category direction conflates appearance with physics;
-the decoder paints appearance. Mechanistic negative --- localizes the gap.
+\paragraph{Conclusion}
+The solid/fluid axis is decodable as a \emph{label} and renderable as \emph{appearance}, but steering
+along it \textbf{repaints the scene toward the target category's visual statistics rather than imposing
+a physics counterfactual on a fixed object}. The crude category direction conflates appearance with
+physics, and the decoder faithfully paints the appearance part. This is a \emph{mechanistic} negative:
+it does not just say ``steering failed,'' it localizes \emph{why} --- the supervised category axis is
+the wrong target because category is entangled with object identity, background, and palette. Step~2 is
+the constructive answer to this negative: a single continuous quantity, in a confound-stripped dataset,
+\emph{is} steerable.
 
 \begin{figure}[h]
 \centering
-\includegraphics[width=0.95\linewidth]{figures/steer_filmstrip.png}
-\caption{Steered decode of a real fluid clip (domino-in-juice) as $\alpha$ increases along the
+\includegraphics[width=0.95\linewidth]{figures/0046_full-videos_16FPS_perspective-left_take-1_trimmed-domino-in-juice_filmstrip.png}
+\caption{Steered decode of a real fluid clip (domino-in-juice) as \alphanorm{} increases along the
 solid$-$fluid latent direction. The mug, table, and drink stay structurally fixed; the only systematic
-effect of $\alpha$ is a global cool/blue \emph{appearance} shift that degrades into block artifacts by
-$\alpha{=}1.5$. The intervention repaints the scene toward the target category's visual statistics
-rather than imposing a physics counterfactual on the object --- appearance, not dynamics. This is the
-documented Step-3 negative. \textbf{[download from cluster --- see figures/DOWNLOAD.md]}}
+effect is a global cool/blue \emph{appearance} shift that degrades into block artifacts by
+$\alphanorm{=}1.5$. The intervention repaints toward the target category's visual statistics rather than
+imposing a physics counterfactual --- appearance, not dynamics.}
 \label{fig:filmstrip}
 \end{figure}
 
+\paragraph{What the negative tells us to do next.}
+Two design faults caused it, and both are fixable: (i) the \emph{target variable} (a discrete category)
+is entangled with appearance, and (ii) the \emph{data} (rich, varied real clips) is full of confounds.
+The next phase removes both: pick a single, continuous, exactly-known physical variable, and put it in a
+dataset stripped of everything else.
+
+%==============================================================================
 \section{Next steps}
+\label{sec:next}
+%==============================================================================
 
 \begin{itemize}
-\item \textbf{Temporal-preserving latent.} Clip-pooling collapses all $2048 = 8{\cdot}16{\cdot}16$
-tokens to one $1024$-vector --- throws away the temporal axis where dynamics live. Move to an
-$8\times1024$ temporal-preserving probe/direction.
-\item \textbf{Quantity directions from labelled synthetic (Step 2).} Direction tied to a measured
-quantity (velocity, gravity) far likelier to be a renderable physics axis than a category centroid.
-Use \texttt{steer\_decode.py} where ground truth exists.
-\item \textbf{(Optional) appearance-orthogonalized direction} --- only worth it once a quantity/temporal
-direction shows object-level effects; on current evidence orthogonalizing may remove the only
-component that renders.
-\item Don't invest more in category-centroid steering.
+\item \textbf{Transfer the velocity edit to real video.} The Step-2 edit is proven on synthetic 2D balls;
+the open question is whether a velocity direction learned on synthetic data steers velocity in real
+Physics-IQ clips through the same decoder. This is the quantity-direction redo of the Step-3 negative.
+\item \textbf{A position/trajectory-conditioned operator} to recover the scene-local part of the velocity
+edit, so steering no longer needs a matched same-scene clip --- the one lever the 2D-velocity negatives
+point to.
+\item \textbf{Camera-viewpoint equivariance} needs a 3D renderer (\todo{choose 3D renderer for the
+viewpoint variant}); the 2D rotation equivariance is promising but not yet settled.
+\item \textbf{Held-out Physics-IQ reconstruction} to de-optimism the Step-0 numbers, and FVD.
 \end{itemize}
 
 \bibliographystyle{iclr2026_conference}
