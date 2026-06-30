@@ -1,0 +1,21 @@
+# Nuisance-control variant: COLOUR. Same same-scene-pair contract as moving_ball_scene.yaml, but
+# velocity + trajectory + radius are held FIXED across the scene and only the ball COLOUR ramps across
+# ranks (dark blue -> dark red; both kept dark so the darkness>0.5 tracker still finds the ball).
+# H_b - H_a isolates the colour factor. Control for the velocity disentanglement test.
+#
+# Splits set per-split at submit (scene-disjoint via distinct seeds):
+#   train: num_clips=2000 seed=0   (500 scenes x 4)
+#   test:  num_clips=400  seed=2   (100 scenes x 4)
+name: moving_ball
+root: null
+image_size: 256
+num_frames: 16
+fps: 4
+scenario: scene_color
+clips_per_scene: 4
+categories: all
+split: train
+num_clips: 2000
+speed_range: [0.012, 0.045]      # one speed sampled per scene, shared across ranks
+radius_range: [0.11, 0.11]       # FIXED radius (colour is the only ramped factor)
+seed: 0

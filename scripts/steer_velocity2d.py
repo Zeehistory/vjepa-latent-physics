@@ -122,6 +122,9 @@ def main() -> None:
                    help="Gaussian mask width for the transport operator; 0 = read from transport_meta.json")
     p.add_argument("--cmd_scales", default="1.0,1.5,2.0,2.5,3.0",
                    help="gain sweep for cmd_U8 (ridge shrinks magnitude; gain corrects it)")
+    p.add_argument("--cmd_ku", type=int, default=8,
+                   help="which fitted command operator to load: 8 -> cmd_Wu_L*.npy (default), "
+                        "16 -> cmd_Wu_ku16_L*.npy (the U16 fallback). Reconstruction adapts automatically.")
     p.add_argument("--device", default="cuda")
     p.add_argument("overrides", nargs="*")
     args = p.parse_args()
@@ -166,8 +169,9 @@ def main() -> None:
     # command-only subspace-synthesis operators (fit_command_operators.py artifacts), if present.
     # W_U: command_features -> U8 coords (reconstruct edit = coords @ U8); B_rich: rich command -> full dH.
     Wu = {}; Brich = {}; have_cmd = False
+    wu_tag = "" if args.cmd_ku == 8 else f"_ku{args.cmd_ku}"
     try:
-        Wu = {L: np.load(art / f"cmd_Wu_L{L}.npy").astype(np.float64) for L in layers}
+        Wu = {L: np.load(art / f"cmd_Wu{wu_tag}_L{L}.npy").astype(np.float64) for L in layers}
         Brich = {L: np.load(art / f"cmd_Brich_L{L}.npy").astype(np.float64) for L in layers}
         have_cmd = True
         print(f"[steer2d] loaded command operators (W_U, B_rich) for layers {layers}")
@@ -232,9 +236,10 @@ def main() -> None:
         }
         if have_cmd:
             phi = vo.command_features(va, vb)                       # (13,)
-            # cmd_U8: synthesize the edit straight in U8 from the command (targets the 21deg ceiling).
+            # cmd_U8: synthesize the edit straight in U from the command (targets the subspace ceiling).
             # Ridge shrinks the predicted coord magnitude, so sweep a global gain to undo the shrinkage.
-            cU8 = {L: (phi @ Wu[L]) @ Ubasis[L][:8] for L in layers}
+            # ku is read from the fitted operator (P, ku) so this adapts to U8 or a U16 refit unchanged.
+            cU8 = {L: (phi @ Wu[L]) @ Ubasis[L][: Wu[L].shape[1]] for L in layers}
             for g in cmd_scales:
                 edits[f"cmd_U8_s{g:g}"] = {L: g * cU8[L] for L in layers}
             edits["ridge_rich"] = {L: phi @ Brich[L] for L in layers}

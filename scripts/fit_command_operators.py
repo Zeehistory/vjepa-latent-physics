@@ -36,7 +36,6 @@ from src.analysis import velocity_ops as vo
 from src.encoders.feature_extractor import LatentDataset
 
 P = vo.COMMAND_FEATURE_DIM  # 13
-KU = 8                       # U-subspace rank to synthesize into (global_basis has 8 rows)
 
 
 def main() -> None:
@@ -46,12 +45,20 @@ def main() -> None:
     p.add_argument("--layers", default="6,12,18,23")
     p.add_argument("--artifacts_dir", required=True, help="dir with global_basis_L*.npy; outputs land here")
     p.add_argument("--ridge", type=float, default=1.0)
+    p.add_argument("--ku", type=int, default=8,
+                   help="U-subspace rank to synthesize into (needs global_basis with >= ku rows). "
+                        "Saved artifacts are tagged cmd_Wu_ku{ku}_L*.npy when ku != 8 so U8/U16 coexist.")
     p.add_argument("--max_scenes", type=int, default=0)
     args = p.parse_args()
 
+    KU = int(args.ku)
     layers = [int(x) for x in args.layers.split(",")]
     art = Path(args.artifacts_dir); art.mkdir(parents=True, exist_ok=True)
     U = {L: np.load(art / f"global_basis_L{L}.npy").astype(np.float64)[:KU] for L in layers}  # (KU, D)
+    for L in layers:
+        if U[L].shape[0] < KU:
+            raise SystemExit(f"global_basis_L{L}.npy has {U[L].shape[0]} rows < ku={KU}; "
+                             f"re-run velocity_subspace.py with --save_k {KU}")
 
     tr = LatentDataset(args.train_dir, layers=layers)
     te = LatentDataset(args.test_dir, layers=layers)
@@ -106,6 +113,8 @@ def main() -> None:
                 gate[L]["rich_cos"].append(vo.cosine(phi @ B_rich[L].astype(np.float64), dH))
         del Ha; gc.collect()
 
+    # ku=8 keeps the canonical names (steer's default); other ku tagged so U8/U16 artifacts coexist.
+    wu_tag = "" if KU == 8 else f"_ku{KU}"
     summary = {"layers": layers, "P": P, "KU": KU, "ridge": args.ridge,
                "n_train_scenes": len(tr_scenes), "n_test_scenes": len(te_scenes),
                "note": "ridge_global cos~0.39 @34deg; subspace_U8 decode=21deg is the cmd_U8 ceiling",
@@ -113,11 +122,11 @@ def main() -> None:
     for L in layers:
         row = {k: round(float(np.mean(v)), 4) for k, v in gate[L].items()}
         summary["per_layer"][str(L)] = row
-        np.save(art / f"cmd_Wu_L{L}.npy", W_U[L])          # (P, KU)
+        np.save(art / f"cmd_Wu{wu_tag}_L{L}.npy", W_U[L])  # (P, KU)
         np.save(art / f"cmd_Brich_L{L}.npy", B_rich[L])    # (P, D)
         print(f"[cmd] L{L}: cmd_U8 reconstr cos={row['cmdU_cos']:.3f} (U8-coord cos={row['coord_cos']:.3f}) "
               f"| ridge_rich cos={row['rich_cos']:.3f}  (ridge_dv baseline 0.39)", flush=True)
-    summary["artifacts"] = {"W_U": "cmd_Wu_L*.npy (P,KU) -> coords; edit = coords @ U8",
+    summary["artifacts"] = {"W_U": f"cmd_Wu{wu_tag}_L*.npy (P,KU) -> coords; edit = coords @ U[:KU]",
                             "B_rich": "cmd_Brich_L*.npy (P,D)",
                             "command_features": "velocity_ops.command_features(va,vb) (13,)"}
     (art / "cmd_operator_meta.json").write_text(json.dumps(summary, indent=2))

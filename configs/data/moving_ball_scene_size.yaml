@@ -1,0 +1,21 @@
+# Nuisance-control variant: SIZE. Same same-scene-pair contract as moving_ball_scene.yaml, but velocity
+# + trajectory are held FIXED across the scene and only the ball RADIUS ramps across ranks (rank 0 =
+# smallest .. rank K-1 = largest). H_b - H_a isolates the size factor. Control for the velocity
+# disentanglement test: the velocity axis should lie in the complement of this size subspace.
+#
+# Splits set per-split at submit (scene-disjoint via distinct seeds):
+#   train: num_clips=2000 seed=0   (500 scenes x 4)
+#   test:  num_clips=400  seed=2   (100 scenes x 4)
+name: moving_ball
+root: null
+image_size: 256
+num_frames: 16
+fps: 4
+scenario: scene_size
+clips_per_scene: 4
+categories: all
+split: train
+num_clips: 2000
+speed_range: [0.012, 0.045]      # one speed sampled per scene, shared across ranks
+radius_range: [0.07, 0.13]       # the RAMPED factor: K distinct radii span this range
+seed: 0

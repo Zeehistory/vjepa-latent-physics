@@ -37,6 +37,11 @@ Variants (selected by ``scenario``):
   flat background shade). ``H_b - H_a`` then isolates that single factor. These are the controls for the
   disentanglement experiment: the "true" velocity axis should lie in the complement of the
   size/colour/background subspaces, so steering velocity leaves size/colour/background untouched.
+* ``scene_velocity2d_mixed`` — like ``scene_velocity2d`` (per scene one start, ``K`` distinct velocity
+  VECTORs), but the appearance (radius, ball colour, background shade) is sampled ONCE per scene and held
+  fixed across its ranks while VARYING across scenes. ``H_b - H_a`` still cancels appearance within a
+  scene; the test is whether the global velocity subspace + linear command map (cmd-U8) survive
+  heterogeneous appearance across scenes.
 * ``occlusion`` — a static vertical wall in the middle of the frame; the ball passes *behind* it and is
   invisible for the middle frames. Tests whether velocity is still decodable while the ball is hidden
   (object-permanence / physical-state evidence).
@@ -88,13 +93,19 @@ def _render(
     occluder: tuple[float, float, float, float] | None,
     rotation: float,
     bg_color: tuple[float, float, float] = (1.0, 1.0, 1.0),
+    shape: str = "disk",
 ) -> np.ndarray:
-    """Anti-aliased disk on a flat background -> (H, W, 3) float in [0, 1].
+    """Anti-aliased object on a flat background -> (H, W, 3) float in [0, 1].
 
     Background is clean white by default; the ``scene_background`` variant passes a lighter/darker flat
     ``bg_color`` to make the background the controlled nuisance factor (ball + trajectory held fixed).
     ``rotation`` (radians) rotates the rendered image about its center — used only by the equivariance
     ``rotated`` scenario to mimic a camera roll. ``pos`` is in normalized [0, 1] image coords.
+
+    ``shape`` selects the rendered object: ``"disk"`` (default, Euclidean distance) or ``"square"``
+    (Chebyshev distance — an axis-aligned box of half-side ``radius``). The square is the cross-OBJECT
+    control: identical trajectory / velocity ground truth, different object identity, so it tests whether
+    a velocity probe/operator fit on the disk is object-AGNOSTIC (a physical quantity) or disk-bound.
     """
     h = w = image_size
     ys, xs = np.mgrid[0:h, 0:w]
@@ -114,7 +125,10 @@ def _render(
         img[..., c] = bg_color[c]
 
     if visible:
-        d = np.sqrt((xn - pos[0]) ** 2 + (yn - pos[1]) ** 2)
+        if shape == "square":
+            d = np.maximum(np.abs(xn - pos[0]), np.abs(yn - pos[1]))  # Chebyshev -> axis-aligned box
+        else:
+            d = np.sqrt((xn - pos[0]) ** 2 + (yn - pos[1]) ** 2)
         edge = 1.5 / image_size  # ~1.5px soft edge
         alpha = np.clip((radius - d) / edge + 0.5, 0.0, 1.0)
         for c in range(3):
@@ -149,8 +163,10 @@ class MovingBall:
         camera_rotation: bool = False,
         ball_color: tuple[float, float, float] = (0.15, 0.15, 0.15),
         clips_per_scene: int = 4,
+        shape: str = "disk",
         seed: int = 0,
     ) -> None:
+        self.shape = shape
         self.image_size = image_size
         self.num_frames = num_frames
         self.fps = fps
@@ -170,6 +186,8 @@ class MovingBall:
             return self._scene_velocity(index)
         if self.scenario == "scene_velocity2d":
             return self._scene_velocity2d(index)
+        if self.scenario == "scene_velocity2d_mixed":
+            return self._scene_velocity2d_mixed(index)
         if self.scenario == "scene_size":
             return self._scene_nuisance(index, "scene_size")
         if self.scenario == "scene_color":
@@ -290,26 +308,63 @@ class MovingBall:
         rank = index % K
         srng = np.random.default_rng(self.seed * 100_003 + 7919 * (scene + 1))
         radius = float(srng.uniform(*self.radius_range))
+        pos0, vels = self._velocity2d_set(srng, radius)
+        vel = vels[rank]
+        return self._roll_out(pos0, vel, radius, occluder=None, rotation=0.0,
+                              scenario="scene_velocity2d", index=index, scene=scene, rank=rank,
+                              scene_velocities=[[float(v[0]), float(v[1])] for v in vels])
+
+    def _velocity2d_set(self, srng: np.random.Generator, radius: float) -> tuple[np.ndarray, np.ndarray]:
+        """K velocity vectors (distinct direction AND speed) + ONE start feasible for every path.
+
+        Shared by ``scene_velocity2d`` and ``scene_velocity2d_mixed``: the ``K`` directions spread
+        roughly uniformly over the circle and the ``K`` speeds span ``speed_range`` (nudged apart so
+        every rank is visibly distinct, then permuted to decorrelate speed from direction ordering).
+        Returns ``(pos0, vels)`` with the in-unison speed shrink (if any) already applied to ``vels``.
+        """
+        K = self.clips_per_scene
         lo, hi = self.speed_range
-        # K directions spread roughly uniformly over the circle (random base + jitter) ...
         base = float(srng.uniform(0, 2 * np.pi))
         angles = np.array([(base + 2 * np.pi * j / K + float(srng.uniform(-0.20, 0.20))) % (2 * np.pi)
                            for j in range(K)])
-        # ... and K distinct speeds spanning the range, nudged apart so every rank is visibly distinct.
         speeds = np.sort(srng.uniform(lo, hi, size=K))
         for j in range(1, K):
             min_gap = 0.4 * (hi - lo) / K
             if speeds[j] - speeds[j - 1] < min_gap:
                 speeds[j] = min(hi, speeds[j - 1] + min_gap)
-        # decorrelate speed from direction ordering so rank doesn't trivially encode a speed ramp
         speeds = speeds[srng.permutation(K)]
         vels = np.stack([speeds * np.cos(angles), speeds * np.sin(angles)], axis=1)  # (K, 2)
-        # one start position feasible for ALL K paths (shrinks speeds in unison only if forced)
         pos0, scale = self._shared_start_and_scale(srng, radius, vels)
-        vels = vels * scale
+        return pos0, vels * scale
+
+    def _scene_velocity2d_mixed(self, index: int) -> BallClip:
+        """One clip of a 2D-velocity scene with *per-scene randomized appearance*.
+
+        Within a scene (the ``K`` ranks) the contract of ``scene_velocity2d`` is unchanged — one shared
+        start, ``K`` distinct velocity VECTORs — so ``H_b - H_a`` still isolates ``Delta v`` with
+        appearance cancelled. What changes is that the appearance (ball radius, ball colour, background
+        shade) is sampled ONCE per scene and held fixed across its ranks, but VARIES across scenes. This
+        is the harder transfer test for cmd-U8: does the single global velocity subspace U + the linear
+        command map survive heterogeneous appearance? Colour/background are sampled along the same
+        dark-ball / light-bg segments the nuisance datasets use, so every ball stays clearly darker than
+        every background (the ``darkness>0.5`` tracker keeps working).
+        """
+        K = self.clips_per_scene
+        scene = index // K
+        rank = index % K
+        srng = np.random.default_rng(self.seed * 100_003 + 7919 * (scene + 1))
+        # Per-scene appearance, fixed across ranks (radius drawn first: it sizes the feasible start box).
+        radius = float(srng.uniform(*self.radius_range))
+        pos0, vels = self._velocity2d_set(srng, radius)
+        ct = float(srng.uniform(0.0, 1.0))
+        color = tuple(float((1 - ct) * a + ct * b) for a, b in zip(self._COLOR_LO, self._COLOR_HI))
+        bt = float(srng.uniform(0.0, 1.0))
+        g = float((1 - bt) * self._BG_LO + bt * self._BG_HI)
+        bg_color = (g, g, g)
         vel = vels[rank]
         return self._roll_out(pos0, vel, radius, occluder=None, rotation=0.0,
-                              scenario="scene_velocity2d", index=index, scene=scene, rank=rank,
+                              scenario="scene_velocity2d_mixed", index=index, scene=scene, rank=rank,
+                              color=color, bg_color=bg_color,
                               scene_velocities=[[float(v[0]), float(v[1])] for v in vels])
 
     # nuisance-factor ramp endpoints (held dark/light enough that the darkness>0.5 tracker still
@@ -448,7 +503,7 @@ class MovingBall:
                 # hidden while the ball center lies within the wall band
                 visible = not (x0 <= pos[0] <= x1)
             frames.append(_render(pos, radius, self.image_size, color, visible,
-                                  occluder, rotation, bg_color=bg_color))
+                                  occluder, rotation, bg_color=bg_color, shape=self.shape))
             row = [
                 float(pos[0]), float(pos[1]), float(vel[0]), float(vel[1]),
                 0.0, 0.0,  # acceleration is exactly zero (constant velocity)

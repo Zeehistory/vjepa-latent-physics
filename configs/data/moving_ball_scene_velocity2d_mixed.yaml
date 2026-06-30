@@ -1,0 +1,40 @@
+# 2D-velocity scene dataset with PER-SCENE RANDOMIZED APPEARANCE.
+#
+# Same within-scene contract as moving_ball_scene_velocity2d.yaml — each scene holds ONE initial
+# position and ramps the full 2D velocity VECTOR across ranks (distinct direction AND speed per clip),
+# so H_b - H_a still isolates Delta v = v_b - v_a with appearance cancelled. What changes: the
+# appearance (ball radius, ball colour, background shade) is sampled ONCE per scene and held fixed
+# across that scene's clips, but VARIES across scenes. This is the harder transfer test for cmd-U8:
+# does the single GLOBAL velocity subspace U + the linear command->coords map survive heterogeneous
+# appearance? (Within-scene appearance is constant, so the Delta still cancels it; the only question is
+# whether the SHARED axis transfers across appearance contexts.)
+#
+# Appearance ranges (per scene, fixed across ranks):
+#   radius     ~ U(0.08, 0.13)          (start box is sized to the drawn radius)
+#   ball color ~ along dark-blue(0.10,0.10,0.45) -> dark-red(0.45,0.10,0.10)   (always dark)
+#   background ~ along white(1.0) -> light-grey(0.70)                          (always lighter than ball)
+# All balls stay clearly darker than every background so the darkness>0.5 tracker keeps working.
+#
+# Spec (matches moving_ball_scene_velocity2d.yaml): 16 frames, FPS=4, 256x256 -> VJEPA2-L latent grid
+# (T'=8, 16x16=256 spatial), H in R^{8x256x1024}.
+#
+# Speed cap: with a single shared start serving 8 directions the ball must stay in frame for every
+# heading, and the LARGEST radius (0.13) tightens that, so speeds are capped low (the generator shrinks
+# all speeds in unison per scene only if a scene's direction spread is infeasible).
+#
+# Splits are scene-disjoint via distinct seeds (train=0 / test=2) and set per-split at submit:
+#   train: num_clips=4000 seed=0   (500 scenes x 8)
+#   test:  num_clips=800  seed=2   (100 scenes x 8)
+name: moving_ball
+root: null
+image_size: 256
+num_frames: 16
+fps: 4
+scenario: scene_velocity2d_mixed
+clips_per_scene: 8
+categories: all
+split: train
+num_clips: 4000
+speed_range: [0.012, 0.024]
+radius_range: [0.08, 0.13]   # VARYING radius across scenes (fixed within a scene)
+seed: 0
