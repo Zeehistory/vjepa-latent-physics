@@ -8,7 +8,7 @@
 #   source scripts/ablation/_encoder_env.sh
 
 ENCODER=${ENCODER:-vjepa2_large}
-BASE_DIR=${BASE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
+BASE_DIR=${BASE_DIR:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}
 
 case "$ENCODER" in
   vjepa2_large)
