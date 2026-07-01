@@ -58,23 +58,23 @@ else
         "$SCRIPT_DIR/extract_v2d.sh")
 fi
 
-J_SUB=$(sbatch --parsable --partition="$CPU_PART" --mem=256G \
+J_SUB=$(sbatch --parsable --partition="$CPU_PART" --mem=320G \
     --export=ALL,ENCODER="$ENCODER",BASE_DIR="$BASE_DIR" \
     --dependency=afterok:"$J_TRAIN_EX":"$J_TEST_EX" \
     "$SCRIPT_DIR/subspace_v2d.sh")
-J_CMD=$(sbatch --parsable --partition="$CPU_PART" --mem=256G \
+J_CMD=$(sbatch --parsable --partition="$CPU_PART" --mem=320G \
     --export=ALL,ENCODER="$ENCODER",BASE_DIR="$BASE_DIR" \
     --dependency=afterok:"$J_SUB" \
     "$SCRIPT_DIR/fit_command.sh")
 
 if [ "$SERIAL_GPU" = "1" ]; then
     # Decoder train also waits for test extract so only one GPU job runs at a time.
-    J_TRAIN=$(sbatch --parsable --partition="$GPU_PART" --mem=192G \
+    J_TRAIN=$(sbatch --parsable --partition="$GPU_PART" --mem=256G \
         --export=ALL,ENCODER="$ENCODER",BASE_DIR="$BASE_DIR",MAX_STEPS="${MAX_STEPS:-8000}" \
         --dependency=afterok:"$J_TEST_EX" \
         "$SCRIPT_DIR/train_decoder.sh")
 else
-    J_TRAIN=$(sbatch --parsable --partition="$GPU_PART" --mem=192G \
+    J_TRAIN=$(sbatch --parsable --partition="$GPU_PART" --mem=256G \
         --export=ALL,ENCODER="$ENCODER",BASE_DIR="$BASE_DIR",MAX_STEPS="${MAX_STEPS:-8000}" \
         --dependency=afterok:"$J_TRAIN_EX" \
         "$SCRIPT_DIR/train_decoder.sh")

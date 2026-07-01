@@ -3,7 +3,7 @@
 #SBATCH --partition=bigmem
 #SBATCH --requeue
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=256G
+#SBATCH --mem=320G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/abl_cmdop_%j.out
 #SBATCH --error=logs/abl_cmdop_%j.err
