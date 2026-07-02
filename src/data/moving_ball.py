@@ -395,9 +395,11 @@ class MovingBall:
         lo, hi = radius, 1.0 - radius
         for _ in range(800):
             speed = float(srng.uniform(*self.speed_range))
-            # Mostly downward with a small horizontal component.
-            ang = float(srng.uniform(-np.pi / 2 - 0.35, -np.pi / 2 + 0.35))
+            # Mostly downward on screen (+y): angles near pi/2 so sin(ang) > 0.
+            ang = float(srng.uniform(np.pi / 2 - 0.35, np.pi / 2 + 0.35))
             vel = speed * np.array([np.cos(ang), np.sin(ang)])
+            if vel[1] < 0.008:
+                continue
             pos0 = np.array([
                 float(srng.uniform(lo + 0.12, hi - 0.12)),
                 float(srng.uniform(lo + 0.05, 0.38)),
@@ -411,9 +413,13 @@ class MovingBall:
             t_hit = self._bounce_frame_index(pos0, vel, radius)
             if t_hit is not None and 3 <= t_hit <= self.num_frames - 5:
                 return pos0, vel
-        # Degenerate fallback: straight drop from centre-top.
-        vel = np.array([0.0, -float(self.speed_range[1])])
-        return np.array([0.5, 0.25]), vel
+        # Degenerate fallback: straight drop from upper centre (guaranteed mid-clip hit).
+        speed_y = float(self.speed_range[1])
+        pos0 = np.array([0.5, lo + 0.08])
+        t_hit = (hi - pos0[1]) / speed_y
+        if t_hit > self.num_frames - 5:
+            speed_y = (hi - pos0[1]) / max(4.0, self.num_frames * 0.55)
+        return pos0, np.array([0.0, speed_y])
 
     def _scene_restitution(self, index: int) -> BallClip:
         """One clip of a *restitution* scene: shared incoming trajectory, only ``e`` varies across ranks.
